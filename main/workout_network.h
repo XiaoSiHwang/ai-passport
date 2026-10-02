@@ -3,6 +3,7 @@
 #include "workout_model.h"
 #include "workout_profiles.h"
 #include "ai_quota.h"
+#include "codex_monitor.h"
 #include "esp_err.h"
 
 typedef enum {
@@ -56,3 +57,5 @@ bool workout_network_submit(const workout_config_t *config, const char *token);
 void workout_network_status(workout_network_status_t *status);
 bool workout_network_take_update(workout_network_update_t *update);
 bool workout_network_take_quota(ai_quota_update_t *update);
+bool workout_network_take_codex(codex_monitor_state_t *update);
+bool workout_network_take_alert(codex_alert_t *alert);

@@ -30,7 +30,8 @@ def symbols() -> str:
 
 
 def pixel_font() -> None:
-    glyphs = [["0", "0", "0", "0", "0", "1", "1"], *DIGITS]
+    glyphs = [["0", "0", "0", "0", "0", "1", "1"], *DIGITS,
+              ["0", "1", "1", "0", "1", "1", "0"]]
     bitmap = []
     descriptions = ["    {0},"]
     for rows in glyphs:
@@ -46,23 +47,25 @@ def pixel_font() -> None:
     lines += ["};", "static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {", *descriptions, "};",
               "static const lv_font_fmt_txt_cmap_t cmaps[] = {",
               "    {.range_start = 46, .range_length = 1, .glyph_id_start = 1, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY},",
-              "    {.range_start = 48, .range_length = 10, .glyph_id_start = 2, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY},", "};",
+              "    {.range_start = 48, .range_length = 10, .glyph_id_start = 2, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY},",
+              "    {.range_start = 58, .range_length = 1, .glyph_id_start = 12, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY},", "};",
               "static const lv_font_fmt_txt_dsc_t font_dsc = {",
               "    .glyph_bitmap = glyph_bitmap, .glyph_dsc = glyph_dsc, .cmaps = cmaps,",
-              "    .bpp = 1, .cmap_num = 2, .kern_scale = 16, .bitmap_format = 0,", "};",
+              "    .bpp = 1, .cmap_num = 3, .kern_scale = 16, .bitmap_format = 0,", "};",
               "const lv_font_t workout_digits_35 = {",
               "    .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt, .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,",
               "    .line_height = 35, .base_line = 0, .dsc = &font_dsc,", "};", ""]
     (OUTPUT / "workout_digits_35.c").write_text("\n".join(lines), encoding="utf-8")
 
 
-def network_font(font: Path, converter: Path) -> None:
+def network_font(font: Path, converter: Path, size: int = 16) -> None:
     """Keep broad CJK support for dynamic SSIDs in Flash, separate from the UI subsets."""
-    destination = OUTPUT / "workout_network_font_16.c"
+    name = "workout_network_font_16" if size == 16 else "workout_monitor_font_12"
+    destination = OUTPUT / f"{name}.c"
     subprocess.run(["node", str(converter), "--font", str(font),
                     "--range", "0x20-0x7e,0x3000-0x303f,0x3400-0x9fff,0xff00-0xffef",
-                    "--size", "16", "--bpp", "2", "--format", "lvgl", "--no-compress", "--no-kerning",
-                    "--lv-include", "lvgl.h", "--lv-font-name", "workout_network_font_16",
+                    "--size", str(size), "--bpp", "2", "--format", "lvgl", "--no-compress", "--no-kerning",
+                    "--lv-include", "lvgl.h", "--lv-font-name", name,
                     "--output", str(destination)], check=True)
     source = destination.read_text(encoding="utf-8")
     source = re.sub(r" \* Opts:.*\n", " * Generated with lv_font_conv 1.5.3; see tools/generate_workout_fonts.py.\n", source)
@@ -75,6 +78,7 @@ def main() -> None:
     parser.add_argument("--font", required=True, type=Path)
     parser.add_argument("--converter", required=True, type=Path, help="lv_font_conv 1.5.3 JavaScript entry point")
     parser.add_argument("--network-font", action="store_true", help="Also regenerate the broad 16px CJK SSID font")
+    parser.add_argument("--monitor-font", action="store_true", help="Also regenerate the broad 12px CJK monitoring font")
     args = parser.parse_args()
     version = subprocess.check_output(["node", str(args.converter), "--version"], text=True).strip()
     if version != "1.5.3":
@@ -98,6 +102,8 @@ def main() -> None:
     pixel_font()
     if args.network_font:
         network_font(args.font, args.converter)
+    if args.monitor_font:
+        network_font(args.font, args.converter, 12)
     print("Font SHA-256:", hashlib.sha256(args.font.read_bytes()).hexdigest())
     print("Codepoints:", len(inventory), "Sizes: 12, 16, 20; BPP: 2")
 

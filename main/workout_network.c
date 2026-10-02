@@ -30,12 +30,14 @@
 #define COMMAND_APPLY 100
 #define WORKOUT_SYNC_INTERVAL_MS 300000
 #define QUOTA_SYNC_INTERVAL_MS 60000
+#define CODEX_SYNC_INTERVAL_MS 5000
+#define CODEX_RETRY_INTERVAL_MS 10000
 #define RECONNECT_INTERVAL_MS 30000
 #define SETUP_TIMEOUT_MS 600000
 #define CONNECT_TIMEOUT_MS 20000
 
 static const char *TAG = "workout_net";
-static QueueHandle_t s_commands, s_updates, s_quota_updates;
+static QueueHandle_t s_commands, s_updates, s_quota_updates, s_codex_updates, s_codex_alerts;
 static EventGroupHandle_t s_events;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static workout_network_status_t s_status;
@@ -50,12 +52,19 @@ static workout_cache_t s_cache;
 static ai_quota_cache_t s_quota_cache[AI_QUOTA_PROVIDERS];
 static ai_quota_update_t s_quota;
 static int64_t s_next_quota[AI_QUOTA_PROVIDERS];
+static codex_monitor_state_t s_codex;
+static codex_cursor_t s_codex_cursor;
+static int64_t s_next_codex_tasks, s_next_codex_alerts;
+static unsigned s_sync_turn;
+static unsigned s_monitor_budget;
+static bool s_monitor_alert_turn;
 static bool s_persisted, s_ready;
 static bool s_time_started;
 static esp_netif_t *s_sta, *s_ap;
 static esp_event_handler_instance_t s_wifi_handler, s_ip_handler;
 static bool s_wifi_registered, s_ip_registered;
 static int64_t s_next_sync, s_setup_deadline, s_pending_deadline, s_close_at;
+static void sync_data(void);
 
 typedef struct {
     int kind;
@@ -330,6 +339,27 @@ bool workout_network_take_quota(ai_quota_update_t *update) {
     return s_quota_updates && xQueueReceive(s_quota_updates, update, 0) == pdTRUE;
 }
 
+bool workout_network_take_codex(codex_monitor_state_t *update) {
+    return s_codex_updates && xQueueReceive(s_codex_updates, update, 0) == pdTRUE;
+}
+
+bool workout_network_take_alert(codex_alert_t *alert) {
+    return s_codex_alerts && xQueueReceive(s_codex_alerts, alert, 0) == pdTRUE;
+}
+
+static void codex_publish(void) {
+    if (s_codex_updates) xQueueOverwrite(s_codex_updates, &s_codex);
+}
+
+static void codex_reset(void) {
+    memset(&s_codex, 0, sizeof(s_codex));
+    strcpy(s_codex.data.stream_id, s_codex_cursor.stream_id);
+    codex_alert_t alert;
+    while (workout_network_take_alert(&alert)) { /* Discard notifications from the previous stream. */ }
+    s_next_codex_tasks = s_next_codex_alerts = 0;
+    codex_publish();
+}
+
 static void quota_publish(void) {
     xQueueOverwrite(s_quota_updates, &s_quota);
 }
@@ -370,13 +400,13 @@ static bool https_clock(void) {
     return esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK;
 }
 
-static bool fetch_body(const char *url, http_body_t *body, int *code) {
+static bool fetch_body(const char *url, http_body_t *body, int *code, int timeout_ms) {
     *code = 0;
     if (!https_clock()) return false;
     body->body = calloc(1, WORKOUT_JSON_LIMIT + 1);
     if (!body->body) return false;
     esp_http_client_config_t config = {
-        .url = url, .timeout_ms = 8000, .buffer_size = 1024,
+        .url = url, .timeout_ms = timeout_ms, .buffer_size = 1024,
         .buffer_size_tx = 512, .event_handler = http_event, .user_data = body,
         .disable_auto_redirect = true, .crt_bundle_attach = esp_crt_bundle_attach,
     };
@@ -390,7 +420,7 @@ static bool fetch_body(const char *url, http_body_t *body, int *code) {
 static bool fetch_data(workout_data_t *data) {
     http_body_t body = {0};
     int code;
-    bool received = fetch_body(s_config.server, &body, &code);
+    bool received = fetch_body(s_config.server, &body, &code, 8000);
     bool valid = received && workout_decode_response(body.body, body.length, data);
     free(body.body);
     if (!valid) network_error(received ? WORKOUT_NET_RESPONSE : WORKOUT_NET_HTTP, code);
@@ -409,7 +439,7 @@ static void sync_quota(unsigned provider) {
     http_body_t body = {0};
     int code = 0;
     ai_quota_data_t data = {0};
-    bool valid = ai_quota_url(s_config.server, provider, url) && fetch_body(url, &body, &code)
+    bool valid = ai_quota_url(s_config.server, provider, url) && fetch_body(url, &body, &code, 8000)
         && ai_quota_decode_response(body.body, body.length, provider, &data)
         && ai_quota_newer(&s_quota_cache[provider], &data, url);
     free(body.body);
@@ -442,6 +472,103 @@ static void quota_source_changed(void) {
         s_next_quota[i] = 0;
     }
     quota_publish();
+}
+
+static void sync_codex_tasks(void) {
+    http_body_t body = {0};
+    int code = 0;
+    char url[CODEX_URL_SIZE];
+    codex_tasks_data_t *data = calloc(1, sizeof(*data));
+    bool valid = data && codex_monitor_url(s_config.server, false, false, 0, url)
+        && fetch_body(url, &body, &code, 3000) && codex_tasks_decode(body.body, body.length, data);
+    free(body.body);
+    if (valid && strcmp(data->stream_id, s_codex_cursor.stream_id) == 0
+        && s_codex.available && data->revision < s_codex.data.revision) valid = false;
+    if (valid) {
+        if (codex_cursor_stream(&s_codex_cursor, data->stream_id)) codex_reset();
+        s_codex.data = *data;
+        s_codex.available = true;
+        s_codex.received_ms = now_ms();
+    }
+    free(data);
+    s_codex.failed = !valid;
+    s_codex.checked_ms = now_ms();
+    s_codex.http_status = code;
+    s_next_codex_tasks = now_ms() + (valid ? CODEX_SYNC_INTERVAL_MS
+        : code == 404 ? RECONNECT_INTERVAL_MS : CODEX_RETRY_INTERVAL_MS);
+    codex_publish();
+}
+
+static bool codex_accept_page(const codex_alert_page_t *page) {
+    if (strcmp(page->stream_id, s_codex_cursor.stream_id) != 0) {
+        (void)codex_cursor_stream(&s_codex_cursor, page->stream_id);
+        codex_reset();
+        return false; /* Fetch this stream's silent baseline instead of replaying another database. */
+    }
+    if (!s_codex_cursor.baseline) return codex_cursor_baseline(&s_codex_cursor, page);
+    if (page->next_cursor < s_codex_cursor.cursor) return false;
+    if (!page->count && (page->has_more || page->next_cursor != s_codex_cursor.cursor)) return false;
+    for (unsigned i = 0; i < page->count; i++) {
+        codex_alert_t alert = page->alerts[i];
+        alert.received_ms = now_ms();
+        if (alert.cursor <= s_codex_cursor.cursor) return false;
+        if (!codex_alert_seen(&s_codex_cursor, &alert) && codex_alert_notify(&alert)
+            && xQueueSend(s_codex_alerts, &alert, 0) != pdTRUE) return false;
+        codex_cursor_accept(&s_codex_cursor, &alert);
+    }
+    s_codex_cursor.cursor = page->next_cursor;
+    return true;
+}
+
+static void sync_codex_alerts(void) {
+    http_body_t body = {0};
+    int code = 0;
+    char url[CODEX_URL_SIZE];
+    codex_alert_page_t *page = calloc(1, sizeof(*page));
+    bool valid = page && codex_monitor_url(s_config.server, true, !s_codex_cursor.baseline,
+        s_codex_cursor.cursor, url) && fetch_body(url, &body, &code, 3000)
+        && codex_alerts_decode(body.body, body.length, page);
+    free(body.body);
+    bool accepted = valid && codex_accept_page(page);
+    if (code == 410) {
+        memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
+        codex_reset();
+    }
+    s_codex.alerts_failed = !accepted;
+    bool again = valid && (!s_codex_cursor.baseline || (page->count && (!accepted || page->has_more)));
+    s_next_codex_alerts = now_ms() + (again ? 250
+        : accepted ? CODEX_SYNC_INTERVAL_MS : code == 410 ? 250
+        : code == 404 ? RECONNECT_INTERVAL_MS : CODEX_RETRY_INTERVAL_MS);
+    free(page);
+    codex_publish();
+}
+
+static void sync_due(int64_t now, bool connected) {
+    /* Give monitoring two turns between slow legacy requests, without starving either group. */
+    int64_t due[] = {s_next_sync, s_next_quota[0], s_next_quota[1]};
+    int legacy = -1;
+    for (unsigned i = 0; i < 3; i++) {
+        unsigned kind = (s_sync_turn + i) % 3;
+        if (now >= due[kind]) { legacy = (int)kind; break; }
+    }
+    bool tasks = now >= s_next_codex_tasks, alerts = now >= s_next_codex_alerts;
+    if (connected && (s_monitor_budget || legacy < 0) && (tasks || alerts)) {
+        bool read_alerts = alerts && (!tasks || s_monitor_alert_turn);
+        if (s_monitor_budget) s_monitor_budget--;
+        s_monitor_alert_turn = !read_alerts;
+        if (read_alerts) sync_codex_alerts();
+        else sync_codex_tasks();
+        return;
+    }
+    if (legacy >= 0) {
+        s_sync_turn = ((unsigned)legacy + 1) % 3;
+        s_monitor_budget = 2;
+        if (!legacy) sync_data();
+        else sync_quota((unsigned)legacy - 1);
+    } else if (!connected) {
+        if (tasks) s_next_codex_tasks = now + CODEX_RETRY_INTERVAL_MS;
+        if (alerts) s_next_codex_alerts = now + CODEX_RETRY_INTERVAL_MS;
+    }
 }
 
 static void sync_data(void) {
@@ -498,12 +625,17 @@ static void activate_config(const workout_config_t *config) {
     s_config = *config;
     quota_source_changed();
     if (new_source) {
+        memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
+        codex_reset();
         memset(&s_cache, 0, sizeof(s_cache));
         s_persisted = false;
         const workout_network_update_t update = {0};
         xQueueOverwrite(s_updates, &update);
     }
     s_next_sync = 0;
+    s_sync_turn = 0;
+    s_monitor_budget = 0;
+    s_monitor_alert_turn = false;
 }
 
 static void confirm_candidate(void) {
@@ -651,6 +783,8 @@ static void clear_config(void) {
     s_pending_deadline = 0;
     memset(&s_candidate, 0, sizeof(s_candidate));
     memset(&s_config, 0, sizeof(s_config));
+    memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
+    codex_reset();
     memset(&s_profiles, 0, sizeof(s_profiles));
     memset(&s_retry, 0, sizeof(s_retry));
     s_profile_error = s_profile_dirty = s_manual_switch = false;
@@ -680,7 +814,10 @@ static void process_command(const network_command_t *command) {
         if (s_config.ssid[0] && !s_pending_deadline) {
             s_next_sync = 0;
             for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
+            s_next_codex_tasks = s_next_codex_alerts = 0;
         }
+    } else if (command->kind == WORKOUT_ACTION_CODEX_SYNC) {
+        s_next_codex_tasks = s_next_codex_alerts = 0;
     } else if (command->kind == WORKOUT_ACTION_RECONNECT) {
         workout_network_status_t status;
         workout_network_status(&status);
@@ -708,6 +845,10 @@ static void network_tick(void) {
         xEventGroupClearBits(s_events, JUST_CONNECTED_BIT);
         s_next_sync = 0;
         for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
+        s_next_codex_tasks = s_next_codex_alerts = 0;
+        s_sync_turn = 0;
+        s_monitor_budget = 0;
+        s_monitor_alert_turn = false;
     }
     if (s_pending_deadline) {
         if (bits & CONNECTED_BIT) confirm_candidate();
@@ -723,11 +864,8 @@ static void network_tick(void) {
     workout_network_status(&status);
     if (!status.setup_active) retry_tick(now, bits);
     if (!s_config.ssid[0]) return;
-    /* One request per tick lets provisioning commands run between providers. */
-    if (now >= s_next_sync) sync_data();
-    else for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
-        if (now >= s_next_quota[i]) { sync_quota(i); break; }
-    }
+    /* One request per tick lets provisioning commands run between endpoints. */
+    sync_due(now, (bits & CONNECTED_BIT) != 0);
 }
 
 static void network_task(void *arg) {
@@ -760,19 +898,29 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     s_commands = xQueueCreate(3, sizeof(network_command_t));
     s_updates = xQueueCreate(1, sizeof(workout_network_update_t));
     s_quota_updates = xQueueCreate(1, sizeof(ai_quota_update_t));
-    if (s_events && s_commands && s_updates && s_quota_updates) {
+    s_codex_updates = xQueueCreate(1, sizeof(codex_monitor_state_t));
+    s_codex_alerts = xQueueCreate(CODEX_ALERT_LIMIT, sizeof(codex_alert_t));
+    memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
+    codex_reset();
+    s_sync_turn = 0;
+    s_monitor_budget = 0;
+    s_monitor_alert_turn = false;
+    bool queues = s_events && s_commands && s_updates && s_quota_updates && s_codex_updates && s_codex_alerts;
+    if (queues) {
         for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++)
             (void)workout_store_load_quota(i, &s_quota_cache[i]);
         quota_restore();
     }
-    if (s_events && s_commands && s_updates && s_quota_updates
-        && xTaskCreate(network_task, "workout_net", 7168, NULL, 4, NULL) == pdPASS) return ESP_OK;
+    if (queues && xTaskCreate(network_task, "workout_net", 7168, NULL, 4, NULL) == pdPASS) return ESP_OK;
     if (s_events) vEventGroupDelete(s_events);
     if (s_commands) vQueueDelete(s_commands);
     if (s_updates) vQueueDelete(s_updates);
     if (s_quota_updates) vQueueDelete(s_quota_updates);
+    if (s_codex_updates) vQueueDelete(s_codex_updates);
+    if (s_codex_alerts) vQueueDelete(s_codex_alerts);
     s_commands = s_updates = NULL;
     s_quota_updates = NULL;
+    s_codex_updates = s_codex_alerts = NULL;
     s_events = NULL;
     network_error(WORKOUT_NET_INIT, 0);
     return ESP_ERR_NO_MEM;

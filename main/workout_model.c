@@ -215,10 +215,19 @@ static workout_action_t menu_navigate(workout_navigation_t *nav, workout_input_t
     if (input == WORKOUT_INPUT_DOWN) nav->selection = (nav->selection + 1) % 5;
     if (input != WORKOUT_INPUT_OK) return WORKOUT_ACTION_NONE;
     nav->view = nav->selection == 1 ? WORKOUT_VIEW_AI : nav->selection == 2 ? WORKOUT_VIEW_NETWORK
-              : nav->selection == 4 ? WORKOUT_VIEW_FUTURE : WORKOUT_VIEW_DASHBOARD;
+              : nav->selection == 4 ? WORKOUT_VIEW_CODEX : WORKOUT_VIEW_DASHBOARD;
     bool sync = nav->selection == 3;
     nav->selection = 0;
     return sync ? WORKOUT_ACTION_SYNC : WORKOUT_ACTION_NONE;
+}
+
+static void codex_navigate(workout_navigation_t *nav, workout_input_t input) {
+    unsigned count = nav->codex_count;
+    if (!count || nav->codex_selection >= count) nav->codex_selection = 0;
+    if (count && input == WORKOUT_INPUT_UP) nav->codex_selection = (nav->codex_selection + count - 1) % count;
+    if (count && input == WORKOUT_INPUT_DOWN) nav->codex_selection = (nav->codex_selection + 1) % count;
+    if (count && input == WORKOUT_INPUT_OK) nav->view = nav->view == WORKOUT_VIEW_CODEX
+        ? WORKOUT_VIEW_CODEX_DETAILS : WORKOUT_VIEW_CODEX;
 }
 
 workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t input) {
@@ -240,7 +249,9 @@ workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t inp
     if (nav->view == WORKOUT_VIEW_NETWORK || nav->view == WORKOUT_VIEW_WIFI
         || nav->view == WORKOUT_VIEW_SERVER || nav->view == WORKOUT_VIEW_CONNECTION)
         return profiles_navigate(nav, input);
-    if (nav->view == WORKOUT_VIEW_AI) {
+    if (nav->view == WORKOUT_VIEW_CODEX || nav->view == WORKOUT_VIEW_CODEX_DETAILS) {
+        codex_navigate(nav, input);
+    } else if (nav->view == WORKOUT_VIEW_AI) {
         if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) {
             nav->ai_provider ^= 1;
             nav->ai_weekly = false;

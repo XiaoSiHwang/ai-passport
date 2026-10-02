@@ -9,12 +9,14 @@ add_subdirectory("${REPO_ROOT}/managed_components/lvgl__lvgl" lvgl)
 add_executable(workout_ui_host test_workout_ui.c
     "${REPO_ROOT}/main/workout_ui.c" "${REPO_ROOT}/main/workout_model.c" "${REPO_ROOT}/main/ai_quota.c"
     "${REPO_ROOT}/main/workout_profiles.c"
+    "${REPO_ROOT}/main/codex_monitor.c"
     "${REPO_ROOT}/components/bsp/src/bsp_display_rounding.c"
     "${REPO_ROOT}/assets/fonts/workout_font_12.c"
     "${REPO_ROOT}/assets/fonts/workout_font_16.c"
     "${REPO_ROOT}/assets/fonts/workout_font_20.c"
     "${REPO_ROOT}/assets/fonts/workout_digits_35.c"
-    "${REPO_ROOT}/assets/fonts/workout_network_font_16.c")
+    "${REPO_ROOT}/assets/fonts/workout_network_font_16.c"
+    "${REPO_ROOT}/assets/fonts/workout_monitor_font_12.c")
 target_include_directories(workout_ui_host PRIVATE ../workout_stubs
     "${REPO_ROOT}/main" "${REPO_ROOT}/assets/fonts" "${REPO_ROOT}/components/bsp/src")
 target_link_libraries(workout_ui_host PRIVATE lvgl m)

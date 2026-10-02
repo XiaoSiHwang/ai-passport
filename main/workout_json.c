@@ -1,10 +1,13 @@
 #include "workout_json.h"
+#include "codex_monitor.h"
+#include "workout_profiles.h"
 
 #include "cJSON.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
-static cJSON *bounded_json(const char *json, size_t length) {
+static cJSON *bounded_json(const char *json, size_t length, unsigned token_limit) {
     if (!json || !length || length > WORKOUT_JSON_LIMIT) return NULL;
     unsigned depth = 0, tokens = 0;
     bool quoted = false, escaped = false;
@@ -16,9 +19,9 @@ static cJSON *bounded_json(const char *json, size_t length) {
             else if (c == '\\') escaped = true;
             else if (c == '"') quoted = false;
         } else if (c == '"') quoted = true;
-        else if (c == '{' || c == '[') { if (++depth > 10 || ++tokens > 192) return NULL; }
+        else if (c == '{' || c == '[') { if (++depth > 10 || ++tokens > token_limit) return NULL; }
         else if (c == '}' || c == ']') { if (!depth) return NULL; depth--; }
-        else if (c == ':' || c == ',') { if (++tokens > 192) return NULL; }
+        else if (c == ':' || c == ',') { if (++tokens > token_limit) return NULL; }
         /* cJSON strings contain embedded NULs after decoding this escape. */
         if (c == '\\' && i + 5 < length && memcmp(json + i + 1, "u0000", 5) == 0) return NULL;
     }
@@ -122,7 +125,7 @@ static bool decode_data(const cJSON *root, workout_data_t *result) {
 }
 
 bool workout_decode_response(const char *json, size_t length, workout_data_t *data) {
-    cJSON *root = bounded_json(json, length);
+    cJSON *root = bounded_json(json, length, 192);
     if (!root) return false;
     workout_data_t result = {0};
     bool valid = decode_data(root, &result);
@@ -171,7 +174,7 @@ static bool quota_data(const cJSON *root, unsigned provider, ai_quota_data_t *re
 }
 
 bool ai_quota_decode_response(const char *json, size_t length, unsigned provider, ai_quota_data_t *data) {
-    cJSON *root = bounded_json(json, length);
+    cJSON *root = bounded_json(json, length, 192);
     if (!root) return false;
     ai_quota_data_t result = {0};
     bool valid = quota_data(root, provider, &result);
@@ -182,7 +185,7 @@ bool ai_quota_decode_response(const char *json, size_t length, unsigned provider
 
 bool workout_decode_config(const char *json, size_t length, workout_config_t *config,
                            char token[33]) {
-    cJSON *root = bounded_json(json, length);
+    cJSON *root = bounded_json(json, length, 192);
     if (!root) return false;
     workout_config_t result = {0};
     char server[WORKOUT_URL_SIZE], candidate_token[33];
@@ -196,5 +199,163 @@ bool workout_decode_config(const char *json, size_t length, workout_config_t *co
     for (size_t i = 0; valid && result.ssid[i]; i++) if ((unsigned char)result.ssid[i] < 32) valid = false;
     cJSON_Delete(root);
     if (valid) { *config = result; strcpy(token, candidate_token); }
+    return valid;
+}
+
+static bool monitor_text(const cJSON *object, const char *key, char *output, size_t size,
+                         bool identifier) {
+    if (!string(object, key, output, size) || (identifier && !output[0])) return false;
+    if (identifier && !((output[0] >= 'A' && output[0] <= 'Z') || (output[0] >= 'a' && output[0] <= 'z')
+        || (output[0] >= '0' && output[0] <= '9'))) return false;
+    for (size_t index = 0; output[index];) {
+        uint32_t code = workout_text_next(output, &index);
+        if (code < 32 || code == 127 || code == 0xFFFD) return false;
+        if (identifier && !((code >= 'A' && code <= 'Z') || (code >= 'a' && code <= 'z')
+            || (code >= '0' && code <= '9') || code == '_' || code == '.' || code == ':' || code == '-')) return false;
+    }
+    return true;
+}
+
+static bool monitor_bool(const cJSON *object, const char *key, bool *value) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (!cJSON_IsBool(item)) return false;
+    *value = cJSON_IsTrue(item);
+    return true;
+}
+
+static bool monitor_timestamp(const cJSON *object, const char *key, int64_t *seconds) {
+    char timestamp[40];
+    return string(object, key, timestamp, sizeof(timestamp)) && workout_parse_timestamp(timestamp, seconds);
+}
+
+static bool monitor_enum(const cJSON *object, const char *key, const char *const names[],
+                         unsigned count, unsigned *value) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (!cJSON_IsString(item)) return false;
+    for (unsigned i = 0; i < count; i++) {
+        if (strcmp(names[i], item->valuestring) == 0) { *value = i; return true; }
+    }
+    return false;
+}
+
+static bool monitor_approval(const cJSON *object, codex_task_t *task) {
+    if (cJSON_IsNull(object)) return true;
+    static const char *const states[] = {"requested", "unknown"};
+    unsigned state;
+    char tool[49];
+    if (!unique_object(object)
+        || !monitor_text(object, "approval_id", task->approval_id, sizeof(task->approval_id), true)
+        || !monitor_text(object, "summary", task->approval_summary, sizeof(task->approval_summary), false)
+        || !monitor_text(object, "tool", tool, sizeof(tool), false)
+        || !monitor_enum(object, "state", states, 2, &state)) return false;
+    task->approval = state ? CODEX_APPROVAL_UNKNOWN : CODEX_APPROVAL_REQUESTED;
+    return true;
+}
+
+static bool monitor_task(const cJSON *object, codex_task_t *task) {
+    static const char *const statuses[] = {"running", "approval_requested", "ended", "interrupted", "unknown"};
+    unsigned status;
+    if (!unique_object(object)
+        || !monitor_text(object, "task_id", task->task_id, sizeof(task->task_id), true)
+        || !monitor_text(object, "project", task->project, sizeof(task->project), false)
+        || !monitor_text(object, "title", task->title, sizeof(task->title), false)
+        || !monitor_text(object, "step", task->step, sizeof(task->step), false)
+        || !monitor_enum(object, "status", statuses, 5, &status)
+        || !monitor_timestamp(object, "started_at", &task->started_seconds)
+        || !monitor_timestamp(object, "updated_at", &task->updated_seconds)
+        || !monitor_bool(object, "fresh", &task->fresh)
+        || !monitor_approval(cJSON_GetObjectItemCaseSensitive(object, "pending_approval"), task)) return false;
+    task->status = (codex_task_status_t)status;
+    if (task->status == CODEX_TASK_UNKNOWN || task->approval == CODEX_APPROVAL_UNKNOWN) task->fresh = false;
+    if ((status == CODEX_TASK_ENDED || status == CODEX_TASK_INTERRUPTED) && task->approval != CODEX_APPROVAL_NONE) return false;
+    return true;
+}
+
+static const cJSON *monitor_envelope(const cJSON *root, char stream_id[CODEX_ID_SIZE]) {
+    if (!unique_object(root) || !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "success"))) return NULL;
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    uint32_t version;
+    if (!unique_object(data) || !number(data, "schema_version", 1, 1, &version) || version != 1
+        || !monitor_text(data, "stream_id", stream_id, CODEX_ID_SIZE, true)) return NULL;
+    return data;
+}
+
+static bool monitor_tasks_data(const cJSON *root, codex_tasks_data_t *result) {
+    const cJSON *data = monitor_envelope(root, result->stream_id);
+    if (!data || !number(data, "revision", 1, INT32_MAX, &result->revision)
+        || !number(data, "active_count", 1, INT32_MAX, &result->active_count)
+        || !number(data, "pending_approval_count", 1, INT32_MAX, &result->pending_count)
+        || !number(data, "omitted_count", 1, INT32_MAX, &result->omitted_count)
+        || !monitor_bool(data, "source_online", &result->source_online)
+        || !string(data, "generated_at", result->generated_at, sizeof(result->generated_at))
+        || !workout_parse_timestamp(result->generated_at, &result->generated_seconds)) return false;
+    const cJSON *tasks = cJSON_GetObjectItemCaseSensitive(data, "tasks");
+    if (!cJSON_IsArray(tasks) || cJSON_GetArraySize(tasks) > CODEX_TASK_LIMIT) return false;
+    result->count = (unsigned)cJSON_GetArraySize(tasks);
+    for (unsigned i = 0; i < result->count; i++) {
+        if (!monitor_task(cJSON_GetArrayItem(tasks, (int)i), &result->tasks[i])) return false;
+        for (unsigned j = 0; j < i; j++)
+            if (strcmp(result->tasks[i].task_id, result->tasks[j].task_id) == 0) return false;
+    }
+    return true;
+}
+
+bool codex_tasks_decode(const char *json, size_t length, codex_tasks_data_t *data) {
+    cJSON *root = bounded_json(json, length, 384);
+    if (!root) return false;
+    codex_tasks_data_t *result = calloc(1, sizeof(*result));
+    bool valid = result && monitor_tasks_data(root, result);
+    cJSON_Delete(root);
+    if (valid) *data = *result;
+    free(result);
+    return valid;
+}
+
+static bool monitor_alert(const cJSON *object, codex_alert_t *alert) {
+    static const char *const states[] = {"requested", "resolved", "superseded", "unknown"};
+    static const codex_approval_state_t values[] = {CODEX_APPROVAL_REQUESTED, CODEX_APPROVAL_RESOLVED,
+        CODEX_APPROVAL_SUPERSEDED, CODEX_APPROVAL_UNKNOWN};
+    unsigned state;
+    if (!unique_object(object) || !number(object, "cursor", 1, INT32_MAX, &alert->cursor) || !alert->cursor
+        || !monitor_text(object, "alert_id", alert->alert_id, sizeof(alert->alert_id), true)
+        || !monitor_text(object, "approval_id", alert->approval_id, sizeof(alert->approval_id), true)
+        || !monitor_text(object, "task_id", alert->task_id, sizeof(alert->task_id), true)
+        || !monitor_text(object, "project", alert->project, sizeof(alert->project), false)
+        || !monitor_text(object, "title", alert->title, sizeof(alert->title), false)
+        || !monitor_text(object, "summary", alert->summary, sizeof(alert->summary), false)
+        || !monitor_timestamp(object, "created_at", &alert->created_seconds)
+        || !monitor_enum(object, "state", states, 4, &state)
+        || !monitor_bool(object, "fresh", &alert->fresh)) return false;
+    alert->state = values[state];
+    return true;
+}
+
+static bool monitor_alerts_data(const cJSON *root, codex_alert_page_t *result) {
+    const cJSON *data = monitor_envelope(root, result->stream_id);
+    if (!data || !number(data, "next_cursor", 1, INT32_MAX, &result->next_cursor)
+        || !number(data, "latest_cursor", 1, INT32_MAX, &result->latest_cursor)
+        || !monitor_bool(data, "has_more", &result->has_more)
+        || result->next_cursor > result->latest_cursor
+        || result->has_more != (result->next_cursor < result->latest_cursor)) return false;
+    const cJSON *alerts = cJSON_GetObjectItemCaseSensitive(data, "alerts");
+    if (!cJSON_IsArray(alerts) || cJSON_GetArraySize(alerts) > CODEX_ALERT_LIMIT) return false;
+    result->count = (unsigned)cJSON_GetArraySize(alerts);
+    for (unsigned i = 0; i < result->count; i++) {
+        codex_alert_t *alert = &result->alerts[i];
+        if (!monitor_alert(cJSON_GetArrayItem(alerts, (int)i), alert)
+            || alert->cursor > result->next_cursor || (i && alert->cursor <= result->alerts[i - 1].cursor)) return false;
+        strcpy(alert->stream_id, result->stream_id);
+    }
+    return !result->count || result->alerts[result->count - 1].cursor == result->next_cursor;
+}
+
+bool codex_alerts_decode(const char *json, size_t length, codex_alert_page_t *page) {
+    cJSON *root = bounded_json(json, length, 384);
+    if (!root) return false;
+    codex_alert_page_t *result = calloc(1, sizeof(*result));
+    bool valid = result && monitor_alerts_data(root, result);
+    cJSON_Delete(root);
+    if (valid) *page = *result;
+    free(result);
     return valid;
 }

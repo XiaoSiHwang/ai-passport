@@ -22,10 +22,11 @@ the firmware palette.
 | Wi-Fi / server list | Select a saved entry; three rows per page | Switch selection; an empty list opens setup | Network and interface |
 | Connection status | Select reconnect/sync or add configuration | Run the selected action | Network and interface |
 | Setup QR codes | Switch the two QR steps | Start setup, or switch steps while active | Stop setup and return to network settings |
-| More pages | Reserved | Reserved | Page menu |
+| Codex tasks / details | Switch the three returned tasks | Open / close details; retry a failed sync | Page menu |
+| Approval reminder | No page action | Dismiss locally | Dismiss locally |
 
 The menu contains the dashboard, AI usage, network configuration, manual synchronization,
-and a reserved page for future functions. Long Down on the network page opens a
+and Codex tasks. Long Down on the network page opens a
 confirmation to clear all saved Wi-Fi networks and server addresses. OK confirms;
 Up/Down cancels and closes provisioning. Long Down is also available on the setup page.
 Clearing network configuration retains the workout and AI snapshots.
@@ -175,6 +176,64 @@ Workout/AI blob formats and partitions remain compatible. The new network-histor
 schema inherits the old single configuration as described above; a compatible
 segmented firmware update can retain it.
 
+## Codex tasks and approval reminders
+
+Open **Codex tasks** from the page menu. The approved light layout shows one
+task at a time: project, title, status, current step, recorded elapsed time,
+last successful fetch and position. Up/Down switches tasks; OK opens details.
+Selection follows the task ID when backend priority ordering changes. The
+backend returns at most three tasks; details report the omitted count. A title
+that exceeds four detail lines scrolls in full. Boot still opens the workout
+dashboard.
+
+The saved workout URL derives `/api/codex/tasks` and `/api/codex/alerts`, preserving
+its origin and reverse-proxy prefix. Both poll every five seconds with a three-second
+HTTP timeout, independently of workout/quota results. All five endpoints share the
+existing worker, with one request per tick, two monitoring turns between legacy
+requests and round-robin scheduling within each group to prevent starvation.
+Slow requests and HTTPS clock synchronization can delay polling; the
+end-to-end latency needs measurement on the device. A missing monitor endpoint
+retries after 30 seconds; other failures retry after ten seconds. OK on a failed
+monitor page requests only monitor retries.
+
+The schema-version-1 decoder accepts the backend's bounded UTF-8 envelopes,
+31-bit revisions/cursors, three tasks and five alerts per page. Malformed,
+oversized, unsupported-schema or older-revision responses retain the previous
+RAM snapshot. Wi-Fi loss, backend failure, host offline, backend `fresh=false`,
+unknown approval or a snapshot older than 15 seconds is explicitly non-live.
+Silence never marks a task ended. Elapsed time is estimated from the API timestamps
+and monotonic time since reception; clock differences can affect it, and invalid
+or reversed timestamps display `--`. Ended/interrupted means the turn stopped,
+not that the user's requirement succeeded.
+
+First connection and device reboot request alerts without `after`, establishing
+a silent cursor baseline. Existing approval requests remain visible in task state.
+Short disconnections keep the cursor; `has_more` reads the next page promptly.
+Only a new `requested`, `fresh=true` alert wakes the screen and opens the amber
+reminder over the current page. Cursor ordering and a bounded recent-ID set prevent
+replays. A full five-item notification queue stops cursor advancement until it
+can accept the remaining items. Resolved, superseded, unknown and stale events
+advance the cursor silently. A 410 or changed stream rebuilds the baseline and
+refreshes tasks; switching/clearing the server discards the old stream and queued
+notifications.
+
+OK or Long OK only closes the reminder and returns to the underlying page;
+it does not approve, deny or send a decision to Codex. The task badge remains until
+the backend changes its state. A later snapshot can dismiss a reminder whose
+request is resolved/superseded/unknown; offline or a later failed/stale task read closes an
+open reminder. Queued alerts older than 15 seconds cannot wake the device. New
+valid reminders reset the normal 30/60-second backlight policy. Task data, cursors
+and reminders stay in bounded RAM and are not written to NVS; reboot establishes
+a new silent baseline. Existing workout, quota and network storage formats stay
+compatible. No collector Hooks, desktop trust or backend credentials are changed
+by the firmware.
+
+Dynamic projects, titles, steps and summaries use matching 12/16 px CJK fallback
+fonts. Unsupported characters or glyphs exceeding the row's vertical metrics
+show an explicit Unicode code. Lists/popups truncate with ellipses; details show
+the full supported title. Read endpoints follow the backend's trusted-LAN model;
+public deployment requires a separate authentication design.
+
 ## Validation and device acceptance
 
 Run `./tools/validate.sh`. The static gate covers navigation, dates, URL bounds,
@@ -199,6 +258,17 @@ exhausted/missing quota, unknown resets, offline data and unavailable providers.
 Device acceptance must exercise those states, provider/period navigation, the
 five-item menu, real API responses, offline restart and interrupted writes. Inspect
 Chinese glyphs and heap/stack behavior during repeated requests and provisioning.
+
+Codex checks cover actual backend response fixtures, malformed/duplicate fields,
+UTF-8/schema/size/count bounds, cursor baselines/replay/expiry, queue backpressure,
+source changes, independent scheduling, stale data, selection by ID and the actual
+app's local-only dismissal/wake/button-callback boundary. LVGL rendering covers
+tasks/details, approval/unknown/ended/interrupted, offline/failed/empty states,
+dynamic Chinese, unsupported glyphs and full-title scrolling within the 24 KB
+pool. Device acceptance still needs real collector events, readable Chinese and
+screen boundaries, cross-page wake, duplicate suppression, reconnect/410 recovery,
+source switching, endpoint failures, measured latency and heap/stack high-water
+marks with the new monitoring workload.
 
 On the device, verify both QR scans, manual joining, wrong-password recovery,
 router absence, IP acquisition, backend 200/502/timeout behavior, cache-write

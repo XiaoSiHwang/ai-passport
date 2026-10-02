@@ -10,6 +10,7 @@ LV_FONT_DECLARE(workout_font_16);
 LV_FONT_DECLARE(workout_font_20);
 LV_FONT_DECLARE(workout_digits_35);
 LV_FONT_DECLARE(workout_network_font_16);
+LV_FONT_DECLARE(workout_monitor_font_12);
 static uint16_t s_frame[240 * 320], s_buffer[240 * 20];
 
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels) {
@@ -116,6 +117,74 @@ static void connectivity_screens(workout_ui_state_t *state) {
     assert(!lv_font_get_glyph_dsc(&workout_network_font_16, &glyph, 0x1F600, 0) || glyph.is_placeholder);
 }
 
+static void codex_text_screens(workout_ui_state_t *state) {
+    codex_task_t *task = &state->codex.data.tasks[0];
+    state->codex.data.count = 1; state->navigation.view = WORKOUT_VIEW_CODEX_DETAILS;
+    memset(task->title, 'W', 96); task->title[96] = 0;
+    workout_ui_update(state); screenshot("codex-task-marquee.ppm");
+    lv_obj_t *title_label = lv_obj_get_child(lv_screen_active(), 1);
+    assert(!lv_obj_has_flag(title_label, LV_OBJ_FLAG_HIDDEN));
+    assert(strlen(lv_label_get_text(title_label)) == 96);
+    memcpy(task->title, "\xF0\x9F\x98\x80", 4);
+    workout_ui_update(state); screenshot("codex-task-unsupported.ppm");
+    assert(strstr(lv_label_get_text(title_label), "[U+1F600]"));
+    const lv_font_t *font = lv_obj_get_style_text_font(title_label, LV_PART_MAIN);
+    lv_font_glyph_dsc_t glyph = {0};
+    assert(lv_font_get_glyph_dsc(font, &glyph, 0x9F98, 0) && !glyph.is_placeholder);
+    assert(lv_font_get_glyph_dsc(&workout_monitor_font_12, &glyph, 0x9F98, 0) && !glyph.is_placeholder);
+    strcpy(task->title, "龘项目动态标题"); strcpy(task->project, "任意项目"); strcpy(task->step, "请确认执行权限");
+    workout_ui_update(state); screenshot("codex-task-dynamic-chinese.ppm");
+    state->navigation.view = WORKOUT_VIEW_MENU; workout_ui_update(state); lv_refr_now(NULL);
+}
+
+static void codex_screens(workout_ui_state_t *state) {
+    state->navigation.view = WORKOUT_VIEW_CODEX;
+    state->navigation.codex_count = state->codex.data.count = 3;
+    state->network.online = state->network.has_config = true;
+    state->codex.available = state->codex.data.source_online = true;
+    state->codex.received_ms = state->now_ms = 1000;
+    state->codex.data.active_count = 2;
+    strcpy(state->codex.data.stream_id, "stream_a");
+    assert(workout_parse_timestamp("2026-10-02T10:10:28Z", &state->codex.data.generated_seconds));
+    for (unsigned i = 0; i < 3; i++) {
+        codex_task_t *task = &state->codex.data.tasks[i];
+        snprintf(task->task_id, sizeof(task->task_id), "task_%u", i);
+        strcpy(task->project, "ai-passport"); task->fresh = true;
+        strcpy(task->title, "增加 Codex 任务与审批提醒"); strcpy(task->step, "正在修改代码");
+        task->started_seconds = state->codex.data.generated_seconds - 628;
+        task->updated_seconds = state->codex.data.generated_seconds;
+    }
+    workout_ui_update(state); screenshot("codex-tasks.ppm");
+    strcpy(state->codex.data.tasks[0].title, "为 AI Passport 增加任务提醒与断网后的状态恢复");
+    state->navigation.view = WORKOUT_VIEW_CODEX_DETAILS;
+    workout_ui_update(state); screenshot("codex-task-details.ppm");
+    codex_task_t *task = &state->codex.data.tasks[0];
+    task->status = CODEX_TASK_APPROVAL; task->approval = CODEX_APPROVAL_REQUESTED;
+    strcpy(task->approval_summary, "需要在电脑端授权：Bash");
+    state->codex.data.pending_count = 1; state->navigation.view = WORKOUT_VIEW_CODEX;
+    workout_ui_update(state); screenshot("codex-task-approval-badge.ppm");
+    state->codex_popup = true;
+    strcpy(state->codex_alert.title, "增加 Codex 任务与审批提醒");
+    strcpy(state->codex_alert.summary, "需要在电脑端授权：Bash");
+    workout_ui_update(state); screenshot("codex-approval-popup.ppm");
+    assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(), 0), LV_OBJ_FLAG_HIDDEN));
+    assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(), 1), LV_OBJ_FLAG_HIDDEN));
+    state->codex_popup = false; task->approval = CODEX_APPROVAL_UNKNOWN; task->fresh = false;
+    workout_ui_update(state); screenshot("codex-approval-unknown.ppm");
+    task->approval = CODEX_APPROVAL_NONE; task->status = CODEX_TASK_ENDED; task->fresh = true;
+    state->codex.data.pending_count = 0;
+    workout_ui_update(state); screenshot("codex-task-ended.ppm");
+    task->status = CODEX_TASK_INTERRUPTED;
+    workout_ui_update(state); screenshot("codex-task-interrupted.ppm");
+    state->network.online = false; state->now_ms = 61000;
+    workout_ui_update(state); screenshot("codex-tasks-offline.ppm");
+    state->network.online = true; state->codex.failed = true;
+    workout_ui_update(state); screenshot("codex-tasks-sync-failed.ppm");
+    state->codex.failed = false; state->now_ms = 1000; state->codex.data.count = 0;
+    workout_ui_update(state); screenshot("codex-tasks-empty.ppm");
+    codex_text_screens(state);
+}
+
 int main(void) {
     lv_init();
     lv_display_t *display = lv_display_create(240, 320);
@@ -154,12 +223,19 @@ int main(void) {
     workout_ui_update(&state); screenshot("empty.ppm");
     quota_screens(&state);
     connectivity_screens(&state);
+    codex_screens(&state);
     lv_mem_monitor_t before, after;
     lv_mem_monitor(&before);
     for (unsigned i = 0; i < 30; i++) {
         state.network.setup_active = true;
         state.navigation.view = WORKOUT_VIEW_SETUP;
         state.navigation.setup_step = i % 2;
+        workout_ui_update(&state); lv_refr_now(NULL);
+        state.navigation.view = WORKOUT_VIEW_MENU;
+        workout_ui_update(&state); lv_refr_now(NULL);
+        state.navigation.view = WORKOUT_VIEW_CODEX; state.codex_popup = true;
+        workout_ui_update(&state); lv_refr_now(NULL);
+        state.codex_popup = false; state.navigation.view = WORKOUT_VIEW_CODEX_DETAILS;
         workout_ui_update(&state); lv_refr_now(NULL);
         state.navigation.view = WORKOUT_VIEW_MENU;
         workout_ui_update(&state); lv_refr_now(NULL);

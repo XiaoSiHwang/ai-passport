@@ -136,7 +136,7 @@ static void navigation(void) {
     workout_navigate(&nav, WORKOUT_INPUT_UP);
     assert(nav.selection == 4);
     workout_navigate(&nav, WORKOUT_INPUT_OK);
-    assert(nav.view == WORKOUT_VIEW_FUTURE);
+    assert(nav.view == WORKOUT_VIEW_CODEX);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);

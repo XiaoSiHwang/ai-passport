@@ -39,15 +39,11 @@ static void refresh(void) {
     bsp_lvgl_unlock();
 }
 
-static void handle_input(workout_input_t input) {
-    bool waking = s_brightness == 0;
-    s_last_activity = esp_timer_get_time();
-    s_brightness = 100;
-    bsp_display_backlight(100);
-    if (waking) return; /* The first key wakes the screen without changing pages. */
+static void navigate_input(workout_input_t input) {
     workout_action_t action;
     if (s_state.network.profile_busy && input == WORKOUT_INPUT_OK
         && s_state.navigation.view != WORKOUT_VIEW_DASHBOARD && s_state.navigation.view != WORKOUT_VIEW_AI
+        && s_state.navigation.view != WORKOUT_VIEW_CODEX && s_state.navigation.view != WORKOUT_VIEW_CODEX_DETAILS
         && s_state.navigation.view != WORKOUT_VIEW_DETAILS && s_state.navigation.view != WORKOUT_VIEW_MENU) {
         s_state.request_failed = true;
         refresh();
@@ -55,7 +51,10 @@ static void handle_input(workout_input_t input) {
     }
     workout_navigation_t previous = s_state.navigation;
     s_state.request_failed = false;
-    if (s_state.navigation.view == WORKOUT_VIEW_SETUP && input == WORKOUT_INPUT_OK
+    if ((s_state.navigation.view == WORKOUT_VIEW_CODEX || s_state.navigation.view == WORKOUT_VIEW_CODEX_DETAILS)
+        && input == WORKOUT_INPUT_OK && (s_state.codex.failed || s_state.codex.alerts_failed)) {
+        action = WORKOUT_ACTION_CODEX_SYNC;
+    } else if (s_state.navigation.view == WORKOUT_VIEW_SETUP && input == WORKOUT_INPUT_OK
         && s_state.network.setup_active) {
         s_state.navigation.setup_step ^= 1;
         action = WORKOUT_ACTION_NONE;
@@ -72,12 +71,58 @@ static void handle_input(workout_input_t input) {
     refresh();
 }
 
+static void handle_input(workout_input_t input) {
+    bool waking = s_brightness == 0;
+    s_last_activity = esp_timer_get_time();
+    s_brightness = 100;
+    bsp_display_backlight(100);
+    if (waking) return; /* The first key wakes the screen without changing pages. */
+    if (s_state.codex_popup) {
+        if (input == WORKOUT_INPUT_OK || input == WORKOUT_INPUT_MENU) {
+            s_state.codex_popup = false;
+            refresh(); /* Local dismissal never sends an approval decision. */
+        }
+        return;
+    }
+    navigate_input(input);
+}
+
 static void idle_backlight(void) {
     int64_t idle = esp_timer_get_time() - s_last_activity;
     unsigned brightness = idle >= 60000000 ? 0 : idle >= 30000000 ? 20 : 100;
     if (brightness == s_brightness) return;
     s_brightness = brightness;
     bsp_display_backlight((uint8_t)brightness);
+}
+
+static bool update_codex(void) {
+    char selected[CODEX_ID_SIZE] = {0};
+    unsigned index = s_state.navigation.codex_selection;
+    if (index < s_state.codex.data.count) strcpy(selected, s_state.codex.data.tasks[index].task_id);
+    bool changed = workout_network_take_codex(&s_state.codex);
+    if (changed) {
+        s_state.navigation.codex_count = s_state.codex.data.count;
+        s_state.navigation.codex_selection = codex_monitor_selection(&s_state.codex.data, selected);
+    }
+    s_state.now_ms = esp_timer_get_time() / 1000;
+    if (s_state.codex_popup && !codex_alert_current(&s_state.codex, &s_state.codex_alert,
+        s_state.network.online, s_state.now_ms)) {
+        s_state.codex_popup = false;
+        changed = true;
+    }
+    codex_alert_t alert;
+    while (!s_state.codex_popup && workout_network_take_alert(&alert)) {
+        s_state.now_ms = esp_timer_get_time() / 1000;
+        if (s_state.now_ms - alert.received_ms > CODEX_FRESH_MS
+            || !codex_alert_current(&s_state.codex, &alert, s_state.network.online, s_state.now_ms)) continue;
+        s_state.codex_alert = alert;
+        s_state.codex_popup = true;
+        s_last_activity = esp_timer_get_time();
+        s_brightness = 100;
+        bsp_display_backlight(100);
+        changed = true;
+    }
+    return changed;
 }
 
 static void update_network(void) {
@@ -103,6 +148,7 @@ static void update_network(void) {
         changed = true;
     }
     if (workout_network_take_quota(&s_state.quota)) changed = true;
+    if (update_codex()) changed = true;
     if (changed) refresh();
 }
 
@@ -129,10 +175,11 @@ static void start_network(void) {
 }
 
 static void app_loop(void) {
-    int64_t next_battery = 0;
+    int64_t next_battery = 0, next_codex_frame = 0;
     for (;;) {
         workout_input_t input;
         if (xQueueReceive(s_input, &input, pdMS_TO_TICKS(100)) == pdTRUE) handle_input(input);
+        s_state.now_ms = esp_timer_get_time() / 1000;
         update_network();
         int64_t now = esp_timer_get_time();
         if (now >= next_battery) {
@@ -141,6 +188,11 @@ static void app_loop(void) {
             next_battery = now + 30000000;
         }
         idle_backlight();
+        if (s_state.now_ms >= next_codex_frame) {
+            if (s_brightness && (s_state.navigation.view == WORKOUT_VIEW_CODEX
+                || s_state.navigation.view == WORKOUT_VIEW_CODEX_DETAILS)) refresh();
+            next_codex_frame = s_state.now_ms + 1000;
+        }
         if (s_ui_dirty) refresh();
     }
 }

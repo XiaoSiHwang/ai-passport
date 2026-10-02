@@ -32,6 +32,11 @@
 位图偏移需要 `CONFIG_LV_FONT_FMT_TXT_LARGE=y`；LVGL 内存池保持 24 KB。
 选中的长名称或 URL 通过单个标签滚动显示完整内容。
 
+Codex 监控还使用 `fonts/workout_monitor_font_12.c`，由相同许可证的 OTF 按相同字符
+范围和 2 bpp 设置生成 12 px 字体。应用拥有的 12 / 16 px 子集字体描述符分别将此字体
+和现有网络字体作为同字号后备。显示动态字形前检查行高；未覆盖或超出垂直范围的
+字符明确显示 Unicode 编码。宽字符集字体只读存放在 Flash，不复制到 LVGL 内存池。
+
 使用官方 `lv_font_conv` **1.5.3** 的 CLI 入口重新生成：
 
 ```text
@@ -39,10 +44,11 @@ python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --con
 ```
 
 增加 `--network-font` 参数可以同时重新生成动态网络字体。
+增加 `--monitor-font` 参数可以同时重新生成 12 px 动态监控字体。
 
 脚本收集界面字符（包括标点），选择 12 / 16 / 20 px、2 bpp、不压缩、无字距调整。同时生成
 `fonts/workout_digits_35.c`，它是按仓库 MIT 许可证提供的原创 1 bpp、35 px 像素
-数字字体；5×7 数字图案在脚本中维护。新增中文文案后重新生成，
+数字字体，包含用于时长的冒号；5×7 数字图案在脚本中维护。新增中文文案后重新生成，
 `tests/test_workout_fonts.py` 会检测过期字符集。真机中文显示和联网时的堆内存
 仍需分别验证。
 

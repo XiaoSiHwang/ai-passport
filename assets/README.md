@@ -35,6 +35,13 @@ characters are shown as explicit Unicode codes; no font claims arbitrary Unicode
 coverage. `CONFIG_LV_FONT_FMT_TXT_LARGE=y` is required for its bitmap offsets.
 The LVGL pool stays at 24 KB. Long selected names/URLs scroll in a single label.
 
+Codex monitoring also uses `fonts/workout_monitor_font_12.c`, generated from the
+same licensed OTF, range and 2 bpp settings at 12 px. Application-owned 12/16 px
+subset descriptors use this font and the existing network font as same-size
+fallbacks. Row metrics are checked before displaying dynamic glyphs; unsupported
+or vertically incompatible characters show explicit Unicode codes. The broad
+fonts remain read-only Flash assets and are not copied into the LVGL pool.
+
 Regenerate with the official `lv_font_conv` **1.5.3** CLI entry point:
 
 ```text
@@ -42,10 +49,11 @@ python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --con
 ```
 
 Add `--network-font` to regenerate the broad dynamic font as well.
+Add `--monitor-font` to regenerate the broad 12 px monitoring font.
 
 The script collects UI characters (including punctuation), selects sizes 12/16/20, 2 bpp, no compression
 and no kerning. It also generates `fonts/workout_digits_35.c`, an original 1 bpp
-35 px pixel numeral font under this repository's MIT license. The maintained
+35 px pixel numeral font, including a colon for elapsed time, under this repository's MIT license. The maintained
 5×7 digit patterns live in the script. Rerun the generator after adding Chinese
 UI text; `tests/test_workout_fonts.py` detects an outdated inventory. Real-device
 Chinese rendering and runtime network heap use remain separate checks.

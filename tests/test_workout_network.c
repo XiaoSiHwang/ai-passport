@@ -11,7 +11,14 @@ static wifi_ap_record_t s_associated;
 static workout_profiles_t s_disk;
 static bool s_association, s_write_failure, s_queue_failure;
 static unsigned s_connect_calls, s_write_calls;
-static char s_http_url[WORKOUT_URL_SIZE];
+static char s_http_url[CODEX_URL_SIZE];
+static esp_http_client_config_t s_http_config;
+static bool s_http_monitor;
+static bool s_monitor_http;
+static int s_monitor_code;
+static unsigned s_legacy_delay;
+static codex_tasks_data_t s_wire_tasks;
+static codex_alert_page_t s_wire_alerts;
 
 void test_log(const char *tag, const char *format, ...) { (void)tag; (void)format; }
 int64_t esp_timer_get_time(void) { return s_clock * 1000; }
@@ -83,10 +90,21 @@ esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *access) {
 void esp_fill_random(void *output, size_t size) { memset(output, 7, size); }
 esp_err_t esp_read_mac(uint8_t *output, int kind) { (void)kind; memset(output, 8, 6); return ESP_OK; }
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config) {
-    strcpy(s_http_url, config->url); return &s_station;
+    strcpy(s_http_url, config->url); s_http_config = *config;
+    s_http_monitor = strstr(s_http_url, "/api/codex/tasks") || strstr(s_http_url, "/api/codex/alerts");
+    return &s_station;
 }
-esp_err_t esp_http_client_perform(esp_http_client_handle_t client) { (void)client; return ESP_FAIL; }
-int esp_http_client_get_status_code(esp_http_client_handle_t client) { (void)client; return 503; }
+esp_err_t esp_http_client_perform(esp_http_client_handle_t client) {
+    (void)client;
+    if (!s_monitor_http || !s_http_monitor) { s_clock += s_legacy_delay; return ESP_FAIL; }
+    esp_http_client_event_t event = {.event_id = HTTP_EVENT_ON_DATA, .user_data = s_http_config.user_data,
+                                    .data = "monitor", .data_len = 7};
+    assert(s_http_config.timeout_ms == 3000);
+    return s_http_config.event_handler(&event);
+}
+int esp_http_client_get_status_code(esp_http_client_handle_t client) {
+    (void)client; return s_monitor_http && s_http_monitor ? s_monitor_code : 503;
+}
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) { (void)client; return ESP_OK; }
 esp_err_t esp_crt_bundle_attach(void *config) { (void)config; return ESP_OK; }
 esp_err_t esp_netif_sntp_init(const esp_sntp_config_t *config) { (void)config; return ESP_OK; }
@@ -114,8 +132,30 @@ bool ai_quota_decode_response(const char *json, size_t size, unsigned provider, 
     (void)json; (void)size; (void)provider; (void)data; return false;
 }
 
+bool codex_tasks_decode(const char *json, size_t size, codex_tasks_data_t *data) {
+    (void)json; (void)size; *data = s_wire_tasks; return s_monitor_http;
+}
+
+bool codex_alerts_decode(const char *json, size_t size, codex_alert_page_t *page) {
+    (void)json; (void)size;
+    *page = s_wire_alerts;
+    const char *after = strstr(s_http_url, "?after=");
+    page->count = 0;
+    page->next_cursor = after ? (uint32_t)strtoul(after + 7, NULL, 10) : page->latest_cursor;
+    for (unsigned i = 0; after && i < s_wire_alerts.count; i++) {
+        if (s_wire_alerts.alerts[i].cursor <= page->next_cursor) continue;
+        page->alerts[page->count++] = s_wire_alerts.alerts[i];
+        page->next_cursor = s_wire_alerts.alerts[i].cursor;
+    }
+    page->has_more = page->next_cursor < page->latest_cursor;
+    return s_monitor_http;
+}
+
 static void fixture(void) {
-    if (s_commands) { vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates); vEventGroupDelete(s_events); }
+    if (s_commands) {
+        vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates);
+        vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts); vEventGroupDelete(s_events);
+    }
     memset(&s_disk, 0, sizeof(s_disk));
     workout_config_t config = {.ssid = "Home", .server = "http://home.example.com/api/workout"};
     assert(workout_profiles_add(&s_disk, &config));
@@ -129,6 +169,8 @@ static void fixture(void) {
     s_pending_deadline = s_setup_deadline = s_close_at = s_next_sync = 0;
     s_write_failure = s_queue_failure = s_association = false;
     s_clock = s_connect_calls = s_write_calls = 0;
+    s_monitor_http = false; s_monitor_code = 200; s_legacy_delay = 0;
+    memset(&s_wire_tasks, 0, sizeof(s_wire_tasks)); memset(&s_wire_alerts, 0, sizeof(s_wire_alerts));
     workout_cache_t cache = {0};
     assert(workout_network_start(&config, &cache) == ESP_OK);
     s_ready = true;
@@ -226,9 +268,107 @@ static void automatic_storage_retry(void) {
     assert(!s_profile_dirty && s_disk.active_wifi == 1 && s_write_calls == 1);
 }
 
+static void monitor_fixture(void) {
+    fixture(); got_ip("Home"); network_tick();
+    s_monitor_http = true;
+    strcpy(s_wire_tasks.stream_id, "stream_a"); strcpy(s_wire_alerts.stream_id, "stream_a");
+    s_wire_tasks.revision = 2; s_wire_tasks.source_online = true; s_wire_tasks.count = 1;
+    strcpy(s_wire_tasks.tasks[0].task_id, "task_a"); s_wire_tasks.tasks[0].fresh = true;
+    sync_codex_tasks();
+    s_wire_alerts.latest_cursor = 1;
+    sync_codex_alerts();
+    assert(s_codex.available && s_codex_cursor.baseline && s_codex_cursor.cursor == 1);
+    assert(!s_codex_alerts->count); /* Existing approvals are a badge, not startup notifications. */
+}
+
+static void monitor_page(unsigned first, unsigned count, codex_approval_state_t state, bool fresh) {
+    s_wire_alerts.count = count; s_wire_alerts.latest_cursor = first + count - 1;
+    for (unsigned i = 0; i < count; i++) {
+        codex_alert_t *alert = &s_wire_alerts.alerts[i];
+        memset(alert, 0, sizeof(*alert)); alert->cursor = first + i; alert->state = state; alert->fresh = fresh;
+        strcpy(alert->stream_id, s_wire_alerts.stream_id); strcpy(alert->task_id, "task_a");
+        snprintf(alert->alert_id, sizeof(alert->alert_id), "alert_%u", first + i);
+    }
+}
+
+static void monitoring_replay(void) {
+    monitor_fixture(); monitor_page(2, 1, CODEX_APPROVAL_REQUESTED, true);
+    sync_codex_alerts(); assert(s_codex_cursor.cursor == 2 && s_codex_alerts->count == 1);
+    codex_alert_t alert; assert(workout_network_take_alert(&alert) && alert.cursor == 2);
+    sync_codex_alerts(); assert(!s_codex_alerts->count && s_codex_cursor.cursor == 2);
+    wifi_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
+    assert(s_codex_cursor.baseline && s_codex_cursor.cursor == 2);
+    got_ip("Home"); network_tick(); assert(s_codex_cursor.cursor == 2);
+    monitor_page(3, 1, CODEX_APPROVAL_REQUESTED, false); sync_codex_alerts();
+    monitor_page(4, 1, CODEX_APPROVAL_UNKNOWN, true); sync_codex_alerts();
+    monitor_page(5, 1, CODEX_APPROVAL_RESOLVED, true); sync_codex_alerts();
+    monitor_page(6, 1, CODEX_APPROVAL_SUPERSEDED, true); sync_codex_alerts();
+    assert(s_codex_cursor.cursor == 6 && !s_codex_alerts->count);
+    s_monitor_code = 503; sync_codex_tasks();
+    assert(s_codex.failed && s_codex.available && s_codex.data.revision == 2);
+    s_monitor_code = 200; s_wire_tasks.revision = 1; sync_codex_tasks();
+    assert(s_codex.failed && s_codex.data.revision == 2);
+    s_wire_tasks.revision = 3; sync_codex_tasks(); assert(!s_codex.failed);
+}
+
+static void monitoring_backpressure(void) {
+    monitor_fixture(); monitor_page(2, 5, CODEX_APPROVAL_REQUESTED, true); sync_codex_alerts();
+    assert(s_codex_alerts->count == 5 && s_codex_cursor.cursor == 6);
+    monitor_page(7, 1, CODEX_APPROVAL_REQUESTED, true); sync_codex_alerts();
+    assert(s_codex_cursor.cursor == 6 && s_codex.alerts_failed);
+    codex_alert_t alert;
+    while (workout_network_take_alert(&alert)) { }
+    sync_codex_alerts(); assert(s_codex_cursor.cursor == 7 && s_codex_alerts->count == 1);
+    assert(workout_network_take_alert(&alert));
+    monitor_page(8, 1, CODEX_APPROVAL_REQUESTED, true);
+    strcpy(s_wire_alerts.alerts[0].alert_id, "alert_7"); sync_codex_alerts();
+    assert(s_codex_cursor.cursor == 8 && !s_codex_alerts->count);
+    s_next_sync = 123; s_next_quota[0] = 456;
+    assert(workout_network_request(WORKOUT_ACTION_CODEX_SYNC)); command();
+    assert(!s_next_codex_tasks && !s_next_codex_alerts && s_next_sync == 123 && s_next_quota[0] == 456);
+}
+
+static void monitoring_source_and_expiry(void) {
+    monitor_fixture(); monitor_page(2, 1, CODEX_APPROVAL_REQUESTED, true); sync_codex_alerts();
+    strcpy(s_wire_tasks.stream_id, "stream_b"); sync_codex_tasks();
+    assert(!s_codex_cursor.baseline && !s_codex_alerts->count && strcmp(s_codex.data.stream_id, "stream_b") == 0);
+    strcpy(s_wire_alerts.stream_id, "stream_b"); sync_codex_alerts();
+    assert(s_codex_cursor.baseline && !s_codex_alerts->count);
+    s_monitor_code = 410; sync_codex_alerts();
+    assert(!s_codex_cursor.baseline && !s_codex.available && !s_codex_alerts->count);
+    s_monitor_code = 200; sync_codex_alerts(); sync_codex_alerts(); sync_codex_tasks();
+    assert(s_codex_cursor.baseline && s_codex.available);
+    assert(workout_network_select(WORKOUT_ACTION_SWITCH_SERVER, 1)); command();
+    assert(!s_codex.available && !s_codex_cursor.baseline && !s_codex_alerts->count);
+    s_monitor_http = false;
+    for (unsigned i = 0; i < 5; i++) { s_clock++; network_tick(); }
+    assert(s_next_sync > s_clock && s_next_quota[0] > s_clock && s_next_quota[1] > s_clock);
+    assert(s_next_codex_tasks > s_clock && s_next_codex_alerts > s_clock);
+}
+
+static void monitoring_slow_legacy(void) {
+    monitor_fixture();
+    s_legacy_delay = 8000;
+    s_next_sync = s_next_quota[0] = s_next_quota[1] = 0;
+    s_next_codex_tasks = s_next_codex_alerts = 0;
+    s_monitor_budget = s_sync_turn = 0;
+    int64_t received = s_codex.received_ms;
+    unsigned updates = 0;
+    for (unsigned i = 0; i < 10; i++) {
+        s_clock += 250; network_tick();
+        if (s_codex.received_ms == received) continue;
+        assert(s_codex.received_ms - received <= 9000);
+        received = s_codex.received_ms; updates++;
+    }
+    assert(updates >= 3 && s_next_quota[0] && s_next_quota[1]);
+}
+
 int main(void) {
     automatic_fallback(); manual_wifi(); server_switch(); cooldown_and_setup(); automatic_storage_retry();
+    monitoring_replay(); monitoring_backpressure(); monitoring_source_and_expiry();
+    monitoring_slow_legacy();
     vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates); vEventGroupDelete(s_events);
+    vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts);
     puts("Workout worker network fault injection: PASS");
     return 0;
 }

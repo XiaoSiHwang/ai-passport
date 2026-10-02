@@ -48,12 +48,18 @@ class FontCoverageTest(unittest.TestCase):
 
     def test_pixel_digits(self):
         codepoints = coverage(ROOT / "assets/fonts/workout_digits_35.c")
-        self.assertEqual(codepoints, set(map(ord, "0123456789.")))
+        self.assertEqual(codepoints, set(map(ord, "0123456789.:")))
 
     def test_dynamic_network_font(self):
         codepoints = coverage(ROOT / "assets/fonts/workout_network_font_16.c")
         self.assertTrue(set(range(32, 127)) <= codepoints)
         self.assertTrue(set(map(ord, "家庭网络办公室无线龘")) <= codepoints)
+        self.assertNotIn(0x1F600, codepoints)
+
+    def test_dynamic_monitor_font(self):
+        codepoints = coverage(ROOT / "assets/fonts/workout_monitor_font_12.c")
+        self.assertTrue(set(range(32, 127)) <= codepoints)
+        self.assertTrue(set(map(ord, "任意项目任务摘要审批龘")) <= codepoints)
         self.assertNotIn(0x1F600, codepoints)
 
 

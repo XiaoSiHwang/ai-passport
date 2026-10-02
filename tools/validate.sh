@@ -39,11 +39,20 @@ run_static_checks() {
         -o "${test_dir}/test_workout_model"
     "${test_dir}/test_workout_model"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_codex_monitor.c main/codex_monitor.c main/workout_model.c \
+        -o "${test_dir}/test_codex_monitor"
+    "${test_dir}/test_codex_monitor"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+        -Itests/codex_stubs -Itests/network_stubs -Itests/workout_stubs -Imain \
+        tests/test_codex_app.c main/codex_monitor.c main/workout_model.c "${gc_flag}" \
+        -o "${test_dir}/test_codex_app"
+    "${test_dir}/test_codex_app"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_workout_profiles.c main/workout_profiles.c main/workout_model.c \
         -o "${test_dir}/test_workout_profiles"
     "${test_dir}/test_workout_profiles"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/network_stubs -Itests/workout_stubs -Imain \
-        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c \
+        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c main/codex_monitor.c \
         -o "${test_dir}/test_workout_network"
     "${test_dir}/test_workout_network"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -109,14 +118,19 @@ run_firmware_checks() (
         -c "${IDF_PATH}/components/json/cJSON/cJSON.c" -o "${validation_build_dir}/cjson_host.o"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         -I"${IDF_PATH}/components/json/cJSON" tests/test_workout_json.c \
-        main/workout_json.c main/workout_model.c main/ai_quota.c "${validation_build_dir}/cjson_host.o" \
+        main/workout_json.c main/workout_model.c main/ai_quota.c main/workout_profiles.c "${validation_build_dir}/cjson_host.o" \
         -lm -o "${validation_build_dir}/test_workout_json"
     "${validation_build_dir}/test_workout_json"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         -I"${IDF_PATH}/components/json/cJSON" tests/test_ai_quota_json.c \
-        main/workout_json.c main/workout_model.c main/ai_quota.c "${validation_build_dir}/cjson_host.o" \
+        main/workout_json.c main/workout_model.c main/ai_quota.c main/workout_profiles.c "${validation_build_dir}/cjson_host.o" \
         -lm -o "${validation_build_dir}/test_ai_quota_json"
     "${validation_build_dir}/test_ai_quota_json"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        -I"${IDF_PATH}/components/json/cJSON" tests/test_codex_monitor_json.c \
+        main/workout_json.c main/workout_model.c main/workout_profiles.c main/ai_quota.c \
+        "${validation_build_dir}/cjson_host.o" -lm -o "${validation_build_dir}/test_codex_monitor_json"
+    "${validation_build_dir}/test_codex_monitor_json"
 
     SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
         idf.py -B "${validation_build_dir}" \
