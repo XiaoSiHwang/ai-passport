@@ -48,7 +48,7 @@ typedef struct {
 
 typedef enum {
     WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_DETAILS, WORKOUT_VIEW_MENU,
-    WORKOUT_VIEW_NETWORK, WORKOUT_VIEW_FUTURE, WORKOUT_VIEW_CLEAR,
+    WORKOUT_VIEW_NETWORK, WORKOUT_VIEW_FUTURE, WORKOUT_VIEW_CLEAR, WORKOUT_VIEW_AI,
 } workout_view_t;
 
 typedef enum {
@@ -66,6 +66,8 @@ typedef struct {
     bool monthly;
     unsigned selection;
     unsigned setup_step;
+    unsigned ai_provider;
+    bool ai_weekly;
 } workout_navigation_t;
 
 uint32_t workout_checksum(const void *bytes, size_t size);

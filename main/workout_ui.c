@@ -11,12 +11,13 @@ LV_FONT_DECLARE(workout_font_16);
 LV_FONT_DECLARE(workout_font_20);
 LV_FONT_DECLARE(workout_digits_35);
 
-#define UI_BACKGROUND 0x121B18
-#define UI_PANEL 0x203029
-#define UI_INK 0xF1F5E8
-#define UI_MUTED 0xABBCB0
-#define UI_ACCENT 0xB7E665
-#define UI_TRACK 0x36483B
+/* Fixed light palette from the approved preview, independent of host appearance. */
+#define UI_BACKGROUND 0xEEF1E8
+#define UI_PANEL 0xDCE3D5
+#define UI_INK 0x1B3028
+#define UI_MUTED 0x4C6254
+#define UI_ACCENT 0x316644
+#define UI_TRACK 0xC3CFBC
 
 static lv_obj_t *s_screen, *s_qr, *s_qr_paper;
 static workout_ui_state_t s_state;
@@ -57,6 +58,15 @@ static bool cached(void) {
 }
 
 static const char *network_label(void) {
+    if (s_state.navigation.view == WORKOUT_VIEW_AI) {
+        const ai_quota_state_t *quota = &s_state.quota.providers[s_state.navigation.ai_provider];
+        if (!s_state.network.online) return "离线";
+        if (quota->syncing) return "同步中";
+        if (!quota->available) return quota->failed ? "接口错误" : "等待同步";
+        if (quota->available && !quota->persisted) return "缓存失败";
+        if (quota->from_cache || quota->failed || quota->data.stale) return "旧数据";
+        return "Wi-Fi";
+    }
     if (s_state.network.setup_active) return "配网";
     if (s_state.network.syncing) return "同步中";
     if (!s_state.network.online) return "离线";
@@ -182,14 +192,72 @@ static void details(lv_layer_t *layer) {
 static void menu(lv_layer_t *layer) {
     title(layer, "页面");
     small(layer, "选择一个页面", 20, 65, 180);
-    static const char *entries[] = {"运动看板", "网络与接口", "立即同步", "更多页面"};
-    for (unsigned i = 0; i < 4; i++) {
+    static const char *entries[] = {"运动看板", "AI 用量", "网络与接口", "立即同步", "更多页面"};
+    for (unsigned i = 0; i < 5; i++) {
         bool selected = i == s_state.navigation.selection;
-        rectangle(layer, 20, 94 + (int)i * 42, 200, 34, selected ? UI_ACCENT : UI_PANEL);
-        label(layer, entries[i], 32, 102 + (int)i * 42, 170, &workout_font_16,
+        rectangle(layer, 20, 86 + (int)i * 36, 200, 30, selected ? UI_ACCENT : UI_PANEL);
+        label(layer, entries[i], 32, 93 + (int)i * 36, 170, &workout_font_16,
               selected ? UI_BACKGROUND : UI_INK);
     }
     hint(layer, "上下 选择  确定 进入");
+}
+
+static void quota_reset(lv_layer_t *layer, const ai_quota_window_t *window) {
+    small(layer, "重置时间", 20, 231, 100);
+    if (!window->reset_at[0]) { small(layer, "暂不可用", 141, 231, 79); return; }
+    const char *stamp = window->reset_at;
+    char value[32];
+    snprintf(value, sizeof(value), "%.2s/%.2s %.5s", stamp + 5, stamp + 8, stamp + 11);
+    small(layer, value, 121, 231, 100);
+    size_t length = strlen(stamp);
+    snprintf(value, sizeof(value), "接口时区 UTC%s", stamp[length - 1] == 'Z' ? "+00:00" : stamp + length - 6);
+    small(layer, value, 20, 250, 200);
+}
+
+static void quota_timestamp(lv_layer_t *layer, const ai_quota_state_t *quota) {
+    bool old = quota->from_cache || quota->failed || quota->data.stale || !s_state.network.online;
+    const char *stamp = quota->data.fetched_at;
+    char value[48];
+    snprintf(value, sizeof(value), "%s %.2s/%.2s %.5s", old ? "上次同步" : "同步", stamp + 5, stamp + 8, stamp + 11);
+    small(layer, value, 20, 270, 200);
+}
+
+static void quota_empty(lv_layer_t *layer, const ai_quota_state_t *quota) {
+    label(layer, "额度暂不可用", 30, 133, 190, &workout_font_20, UI_INK);
+    small(layer, "未知额度显示为 --", 30, 177, 180);
+    if (!s_state.network.has_config) small(layer, "长按确定，进入网络配置", 30, 200, 190);
+    else if (quota->http_status && quota->http_status != 200) {
+        char value[40];
+        snprintf(value, sizeof(value), "接口错误 HTTP %d", quota->http_status);
+        small(layer, value, 30, 200, 185);
+    } else small(layer, "可在菜单中重新同步", 30, 200, 190);
+}
+
+static void quota_page(lv_layer_t *layer) {
+    unsigned provider = s_state.navigation.ai_provider;
+    const ai_quota_state_t *quota = &s_state.quota.providers[provider];
+    const ai_quota_window_t *window = &quota->data.windows[s_state.navigation.ai_weekly ? 1 : 0];
+    title(layer, provider ? "GLM" : "Codex");
+    small(layer, provider && quota->data.level[0] ? quota->data.level : "额度详情", 106, 40, 114);
+    small(layer, s_state.navigation.ai_weekly ? "7天额度" : "5小时额度", 20, 64, 200);
+    hint(layer, "上下 换平台  确定 周期");
+    if (!quota->available) { quota_empty(layer, quota); return; }
+    rectangle(layer, 20, 89, 200, 83, UI_PANEL);
+    small(layer, "剩余额度", 30, 99, 170);
+    char value[32];
+    if (!window->available) strcpy(value, "--");
+    else if (window->remaining % 10) snprintf(value, sizeof(value), "%u.%u", window->remaining / 10, window->remaining % 10);
+    else snprintf(value, sizeof(value), "%u", window->remaining / 10);
+    label(layer, value, 30, 121, 153, window->available ? &workout_digits_35 : &workout_font_20, UI_INK);
+    if (window->available) small(layer, "%", 188, 148, 30);
+    if (!window->available) strcpy(value, "该周期暂不可用");
+    else if (!window->remaining) strcpy(value, "额度已用尽");
+    else snprintf(value, sizeof(value), "已使用 %u.%u%%", (1000 - window->remaining) / 10, (1000 - window->remaining) % 10);
+    small(layer, value, 20, 182, 200);
+    unsigned filled = window->available ? workout_progress(window->remaining, 1000, 20) : 0;
+    for (unsigned i = 0; i < 20; i++) rectangle(layer, 20 + (int)i * 10, 205, 8, 9, i < filled ? UI_ACCENT : UI_TRACK);
+    quota_reset(layer, window);
+    quota_timestamp(layer, quota);
 }
 
 static const char *setup_message(void) {
@@ -237,10 +305,11 @@ static void draw(lv_event_t *event) {
         case WORKOUT_VIEW_DETAILS: details(layer); break;
         case WORKOUT_VIEW_MENU: menu(layer); break;
         case WORKOUT_VIEW_NETWORK: network(layer); break;
+        case WORKOUT_VIEW_AI: quota_page(layer); break;
         case WORKOUT_VIEW_CLEAR:
             title(layer, "清除网络设置");
             label(layer, "清除 Wi-Fi 和接口地址？", 20, 134, 205, &workout_font_16, UI_INK);
-            small(layer, "保留上次运动数据", 20, 181, 205);
+            small(layer, "保留运动和 AI 缓存", 20, 181, 205);
             hint(layer, "确定 清除  上下 取消");
             break;
         case WORKOUT_VIEW_FUTURE:

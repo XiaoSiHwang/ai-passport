@@ -40,6 +40,38 @@ static void screenshot(const char *name) {
     printf("%s: LVGL peak=%lu free=%lu\n", name, (unsigned long)memory.max_used, (unsigned long)memory.free_size);
 }
 
+static void quota_screens(workout_ui_state_t *state) {
+    state->navigation.view = WORKOUT_VIEW_AI;
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        ai_quota_state_t *quota = &state->quota.providers[i];
+        quota->available = quota->persisted = true;
+        strcpy(quota->data.fetched_at, "2026-10-02T14:32:00+08:00");
+        assert(workout_parse_timestamp(quota->data.fetched_at, &quota->data.fetched_seconds));
+        quota->data.windows[0] = (ai_quota_window_t){.available = true, .remaining = i ? 350 : 725};
+        strcpy(quota->data.windows[0].reset_at, "2026-10-02T18:30:00+08:00");
+        quota->data.windows[1] = (ai_quota_window_t){.available = true, .remaining = i ? 810 : 580};
+        strcpy(quota->data.windows[1].reset_at, "2026-10-05T12:00:00+08:00");
+    }
+    strcpy(state->quota.providers[1].data.level, "PRO");
+    state->network.online = true;
+    state->network.has_config = true;
+    workout_ui_update(state); screenshot("codex-quota.ppm");
+    state->navigation.ai_weekly = true;
+    workout_ui_update(state); screenshot("codex-weekly.ppm");
+    state->navigation.ai_provider = 1; state->navigation.ai_weekly = false;
+    workout_ui_update(state); screenshot("glm-quota.ppm");
+    state->quota.providers[1].data.windows[0].remaining = 0;
+    state->quota.providers[1].data.windows[0].reset_at[0] = 0;
+    workout_ui_update(state); screenshot("quota-exhausted.ppm");
+    state->quota.providers[1].data.windows[0].available = false;
+    workout_ui_update(state); screenshot("quota-window-missing.ppm");
+    state->quota.providers[1].failed = true; state->network.online = false;
+    workout_ui_update(state); screenshot("quota-offline.ppm");
+    state->quota.providers[1].available = false; state->quota.providers[1].http_status = 503;
+    state->network.online = true;
+    workout_ui_update(state); screenshot("quota-unavailable.ppm");
+}
+
 int main(void) {
     lv_init();
     lv_display_t *display = lv_display_create(240, 320);
@@ -76,6 +108,7 @@ int main(void) {
     workout_ui_update(&state); screenshot("menu.ppm");
     state.navigation.view = WORKOUT_VIEW_DASHBOARD; state.has_data = false;
     workout_ui_update(&state); screenshot("empty.ppm");
+    quota_screens(&state);
     lv_mem_monitor_t before, after;
     lv_mem_monitor(&before);
     for (unsigned i = 0; i < 30; i++) {

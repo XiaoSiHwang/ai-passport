@@ -7,7 +7,7 @@ set(LV_BUILD_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h" CACHE PATH "" FOR
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_subdirectory("${REPO_ROOT}/managed_components/lvgl__lvgl" lvgl)
 add_executable(workout_ui_host test_workout_ui.c
-    "${REPO_ROOT}/main/workout_ui.c" "${REPO_ROOT}/main/workout_model.c"
+    "${REPO_ROOT}/main/workout_ui.c" "${REPO_ROOT}/main/workout_model.c" "${REPO_ROOT}/main/ai_quota.c"
     "${REPO_ROOT}/components/bsp/src/bsp_display_rounding.c"
     "${REPO_ROOT}/assets/fonts/workout_font_12.c"
     "${REPO_ROOT}/assets/fonts/workout_font_16.c"

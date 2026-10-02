@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "main.c"
          "workout_model.c"
+         "ai_quota.c"
          "workout_json.c"
          "workout_store.c"
          "workout_network.c"

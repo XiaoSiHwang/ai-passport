@@ -131,6 +131,55 @@ bool workout_decode_response(const char *json, size_t length, workout_data_t *da
     return valid;
 }
 
+static bool quota_window(const cJSON *object, ai_quota_window_t *window) {
+    if (cJSON_IsNull(object)) return true;
+    uint32_t remaining;
+    if (!unique_object(object) || !number(object, "remaining_percent", 10, 1000, &remaining)) return false;
+    window->available = true;
+    window->remaining = (uint16_t)remaining;
+    const cJSON *reset = cJSON_GetObjectItemCaseSensitive(object, "reset_at");
+    if (cJSON_IsNull(reset)) return true;
+    int64_t seconds;
+    return string(object, "reset_at", window->reset_at, sizeof(window->reset_at))
+        && workout_parse_timestamp(window->reset_at, &seconds);
+}
+
+static bool quota_data(const cJSON *root, unsigned provider, ai_quota_data_t *result) {
+    if (provider >= AI_QUOTA_PROVIDERS || !unique_object(root)
+        || !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "success"))) return false;
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    if (!unique_object(data)) return false;
+    const cJSON *stale = cJSON_GetObjectItemCaseSensitive(data, "stale");
+    if (stale && !cJSON_IsBool(stale)) return false;
+    result->stale = cJSON_IsTrue(stale);
+    if (provider == 1) {
+        const cJSON *level = cJSON_GetObjectItemCaseSensitive(data, "level");
+        if (level && !cJSON_IsNull(level)) {
+            if (!cJSON_IsString(level)) return false;
+            /* Arbitrary plan names stay off the fixed-subset display. */
+            bool printable = strlen(level->valuestring) < sizeof(result->level);
+            for (const char *c = level->valuestring; *c; c++)
+                if ((unsigned char)*c < 32 || (unsigned char)*c > 126) printable = false;
+            if (printable) strcpy(result->level, level->valuestring);
+        }
+    }
+    return quota_window(cJSON_GetObjectItemCaseSensitive(data, "five_hour"), &result->windows[0])
+        && quota_window(cJSON_GetObjectItemCaseSensitive(data, "seven_day"), &result->windows[1])
+        && string(data, "fetched_at", result->fetched_at, sizeof(result->fetched_at))
+        && workout_parse_timestamp(result->fetched_at, &result->fetched_seconds)
+        && ai_quota_data_valid(result);
+}
+
+bool ai_quota_decode_response(const char *json, size_t length, unsigned provider, ai_quota_data_t *data) {
+    cJSON *root = bounded_json(json, length);
+    if (!root) return false;
+    ai_quota_data_t result = {0};
+    bool valid = quota_data(root, provider, &result);
+    cJSON_Delete(root);
+    if (valid) *data = result;
+    return valid;
+}
+
 bool workout_decode_config(const char *json, size_t length, workout_config_t *config,
                            char token[33]) {
     cJSON *root = bounded_json(json, length);

@@ -78,6 +78,7 @@ static void update_network(void) {
         s_state.from_cache = false;
         changed = true;
     }
+    if (workout_network_take_quota(&s_state.quota)) changed = true;
     if (changed) refresh();
 }
 

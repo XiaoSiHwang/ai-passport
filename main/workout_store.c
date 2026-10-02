@@ -65,3 +65,16 @@ esp_err_t workout_store_save_cache(const workout_cache_t *cache) {
     if (!workout_cache_valid(cache, sizeof(*cache))) return ESP_ERR_INVALID_ARG;
     return write_blob("snapshot", cache, sizeof(*cache));
 }
+
+esp_err_t workout_store_load_quota(unsigned provider, ai_quota_cache_t *cache) {
+    if (provider >= AI_QUOTA_PROVIDERS) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = read_blob(provider ? "glm" : "codex", cache, sizeof(*cache));
+    if (err == ESP_OK && !ai_quota_cache_valid(cache, sizeof(*cache), provider)) err = ESP_ERR_INVALID_CRC;
+    if (err != ESP_OK) memset(cache, 0, sizeof(*cache));
+    return err;
+}
+
+esp_err_t workout_store_save_quota(unsigned provider, const ai_quota_cache_t *cache) {
+    if (!ai_quota_cache_valid(cache, sizeof(*cache), provider)) return ESP_ERR_INVALID_ARG;
+    return write_blob(provider ? "glm" : "codex", cache, sizeof(*cache));
+}

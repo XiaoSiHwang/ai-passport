@@ -27,18 +27,22 @@
 #define DISCONNECTED_BIT BIT1
 #define JUST_CONNECTED_BIT BIT2
 #define COMMAND_APPLY 100
-#define SYNC_INTERVAL_MS 300000
+#define WORKOUT_SYNC_INTERVAL_MS 300000
+#define QUOTA_SYNC_INTERVAL_MS 60000
 #define RECONNECT_INTERVAL_MS 30000
 #define SETUP_TIMEOUT_MS 600000
 #define CONNECT_TIMEOUT_MS 20000
 
 static const char *TAG = "workout_net";
-static QueueHandle_t s_commands, s_updates;
+static QueueHandle_t s_commands, s_updates, s_quota_updates;
 static EventGroupHandle_t s_events;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static workout_network_status_t s_status;
 static workout_config_t s_config, s_candidate;
 static workout_cache_t s_cache;
+static ai_quota_cache_t s_quota_cache[AI_QUOTA_PROVIDERS];
+static ai_quota_update_t s_quota;
+static int64_t s_next_quota[AI_QUOTA_PROVIDERS];
 static bool s_persisted, s_ready;
 static bool s_time_started;
 static esp_netif_t *s_sta, *s_ap;
@@ -237,6 +241,28 @@ bool workout_network_take_update(workout_network_update_t *update) {
     return s_updates && xQueueReceive(s_updates, update, 0) == pdTRUE;
 }
 
+bool workout_network_take_quota(ai_quota_update_t *update) {
+    return s_quota_updates && xQueueReceive(s_quota_updates, update, 0) == pdTRUE;
+}
+
+static void quota_publish(void) {
+    xQueueOverwrite(s_quota_updates, &s_quota);
+}
+
+static void quota_restore(void) {
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        ai_quota_cache_t *cache = &s_quota_cache[i];
+        char url[WORKOUT_URL_SIZE];
+        bool source = !s_config.server[0] || (ai_quota_url(s_config.server, i, url)
+            && cache->source == workout_checksum(url, strlen(url)));
+        if (cache->magic && source) {
+            s_quota.providers[i] = (ai_quota_state_t){.data = cache->data,
+                .available = true, .persisted = true, .from_cache = true};
+        }
+    }
+    quota_publish();
+}
+
 static esp_err_t http_event(esp_http_client_event_t *event) {
     if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
     http_body_t *body = event->user_data;
@@ -259,24 +285,78 @@ static bool https_clock(void) {
     return esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK;
 }
 
-static bool fetch_data(workout_data_t *data) {
-    if (!https_clock()) { network_error(WORKOUT_NET_HTTP, 0); return false; }
-    http_body_t body = {.body = calloc(1, WORKOUT_JSON_LIMIT + 1)};
-    if (!body.body) { network_error(WORKOUT_NET_RESPONSE, 0); return false; }
+static bool fetch_body(const char *url, http_body_t *body, int *code) {
+    *code = 0;
+    if (!https_clock()) return false;
+    body->body = calloc(1, WORKOUT_JSON_LIMIT + 1);
+    if (!body->body) return false;
     esp_http_client_config_t config = {
-        .url = s_config.server, .timeout_ms = 8000, .buffer_size = 1024,
-        .buffer_size_tx = 512, .event_handler = http_event, .user_data = &body,
+        .url = url, .timeout_ms = 8000, .buffer_size = 1024,
+        .buffer_size_tx = 512, .event_handler = http_event, .user_data = body,
         .disable_auto_redirect = true, .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-    int code = client ? esp_http_client_get_status_code(client) : 0;
+    *code = client ? esp_http_client_get_status_code(client) : 0;
     if (client) esp_http_client_cleanup(client);
-    bool valid = err == ESP_OK && code == 200 && !body.oversized
-                 && workout_decode_response(body.body, body.length, data);
+    return err == ESP_OK && *code == 200 && !body->oversized;
+}
+
+static bool fetch_data(workout_data_t *data) {
+    http_body_t body = {0};
+    int code;
+    bool received = fetch_body(s_config.server, &body, &code);
+    bool valid = received && workout_decode_response(body.body, body.length, data);
     free(body.body);
-    if (!valid) network_error(err != ESP_OK || code != 200 ? WORKOUT_NET_HTTP : WORKOUT_NET_RESPONSE, code);
+    if (!valid) network_error(received ? WORKOUT_NET_RESPONSE : WORKOUT_NET_HTTP, code);
     return valid;
+}
+
+static void sync_quota(unsigned provider) {
+    ai_quota_state_t *state = &s_quota.providers[provider];
+    if (!(xEventGroupGetBits(s_events) & CONNECTED_BIT)) {
+        s_next_quota[provider] = now_ms() + RECONNECT_INTERVAL_MS;
+        return;
+    }
+    state->syncing = true;
+    quota_publish();
+    char url[WORKOUT_URL_SIZE];
+    http_body_t body = {0};
+    int code = 0;
+    ai_quota_data_t data = {0};
+    bool valid = ai_quota_url(s_config.server, provider, url) && fetch_body(url, &body, &code)
+        && ai_quota_decode_response(body.body, body.length, provider, &data)
+        && ai_quota_newer(&s_quota_cache[provider], &data, url);
+    free(body.body);
+    state->syncing = false;
+    state->failed = !valid;
+    state->http_status = code;
+    s_next_quota[provider] = now_ms() + (valid ? QUOTA_SYNC_INTERVAL_MS : RECONNECT_INTERVAL_MS);
+    if (valid) {
+        ai_quota_cache_t cache;
+        ai_quota_cache_pack(&cache, &data, url, provider);
+        if (!state->persisted || memcmp(&cache, &s_quota_cache[provider], sizeof(cache)) != 0)
+            state->persisted = workout_store_save_quota(provider, &cache) == ESP_OK;
+        s_quota_cache[provider] = cache;
+        state->data = data;
+        state->available = true;
+        state->from_cache = false;
+    }
+    quota_publish();
+    heap_log("quota sync");
+}
+
+static void quota_source_changed(void) {
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        char url[WORKOUT_URL_SIZE];
+        if (s_quota_cache[i].magic && (!ai_quota_url(s_config.server, i, url)
+            || s_quota_cache[i].source != workout_checksum(url, strlen(url)))) {
+            memset(&s_quota_cache[i], 0, sizeof(s_quota_cache[i]));
+            memset(&s_quota.providers[i], 0, sizeof(s_quota.providers[i]));
+        }
+        s_next_quota[i] = 0;
+    }
+    quota_publish();
 }
 
 static void sync_data(void) {
@@ -292,7 +372,7 @@ static void sync_data(void) {
     portEXIT_CRITICAL(&s_status_lock);
     workout_data_t data;
     bool valid = fetch_data(&data);
-    s_next_sync = now_ms() + (valid ? SYNC_INTERVAL_MS : RECONNECT_INTERVAL_MS);
+    s_next_sync = now_ms() + (valid ? WORKOUT_SYNC_INTERVAL_MS : RECONNECT_INTERVAL_MS);
     if (!valid) return;
     uint32_t source = workout_checksum(s_config.server, strlen(s_config.server));
     if (s_cache.magic && source == s_cache.source && data.updated_seconds < s_cache.data.updated_seconds) {
@@ -331,6 +411,7 @@ static void confirm_candidate(void) {
     uint32_t source = workout_checksum(s_candidate.server, strlen(s_candidate.server));
     bool new_source = s_cache.magic && s_cache.source != source;
     s_config = s_candidate;
+    quota_source_changed();
     memset(&s_candidate, 0, sizeof(s_candidate));
     s_pending_deadline = 0;
     if (new_source) {
@@ -375,7 +456,10 @@ static void process_command(const network_command_t *command) {
         if (s_pending_deadline) cancel_candidate(WORKOUT_SETUP_WAITING);
         stop_setup();
     } else if (command->kind == WORKOUT_ACTION_SYNC) {
-        if (s_config.ssid[0] && !s_pending_deadline) s_next_sync = 0;
+        if (s_config.ssid[0] && !s_pending_deadline) {
+            s_next_sync = 0;
+            for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
+        }
     } else if (command->kind == WORKOUT_ACTION_CLEAR) clear_config();
     else if (command->kind == COMMAND_APPLY) {
         workout_network_status_t status;
@@ -393,6 +477,7 @@ static void network_tick(void) {
     if (bits & JUST_CONNECTED_BIT) {
         xEventGroupClearBits(s_events, JUST_CONNECTED_BIT);
         s_next_sync = 0;
+        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
     }
     if (s_pending_deadline) {
         if (bits & CONNECTED_BIT) confirm_candidate();
@@ -405,7 +490,12 @@ static void network_tick(void) {
         setup_result(WORKOUT_SETUP_EXPIRED, false);
     }
     if (s_config.ssid[0] && !(bits & CONNECTED_BIT) && now >= s_next_connect) connect_config(&s_config);
-    if (s_config.ssid[0] && now >= s_next_sync) sync_data();
+    if (!s_config.ssid[0]) return;
+    /* One request per tick lets provisioning commands run between providers. */
+    if (now >= s_next_sync) sync_data();
+    else for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        if (now >= s_next_quota[i]) { sync_quota(i); break; }
+    }
 }
 
 static void network_task(void *arg) {
@@ -432,12 +522,20 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     s_events = xEventGroupCreate();
     s_commands = xQueueCreate(3, sizeof(network_command_t));
     s_updates = xQueueCreate(1, sizeof(workout_network_update_t));
-    if (s_events && s_commands && s_updates
+    s_quota_updates = xQueueCreate(1, sizeof(ai_quota_update_t));
+    if (s_events && s_commands && s_updates && s_quota_updates) {
+        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++)
+            (void)workout_store_load_quota(i, &s_quota_cache[i]);
+        quota_restore();
+    }
+    if (s_events && s_commands && s_updates && s_quota_updates
         && xTaskCreate(network_task, "workout_net", 7168, NULL, 4, NULL) == pdPASS) return ESP_OK;
     if (s_events) vEventGroupDelete(s_events);
     if (s_commands) vQueueDelete(s_commands);
     if (s_updates) vQueueDelete(s_updates);
+    if (s_quota_updates) vQueueDelete(s_quota_updates);
     s_commands = s_updates = NULL;
+    s_quota_updates = NULL;
     s_events = NULL;
     network_error(WORKOUT_NET_INIT, 0);
     return ESP_ERR_NO_MEM;

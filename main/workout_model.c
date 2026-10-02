@@ -193,14 +193,20 @@ workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t inp
         return input == WORKOUT_INPUT_OK ? WORKOUT_ACTION_CLEAR : WORKOUT_ACTION_NONE;
     }
     if (nav->view == WORKOUT_VIEW_MENU) {
-        if (input == WORKOUT_INPUT_UP) nav->selection = (nav->selection + 3) % 4;
-        if (input == WORKOUT_INPUT_DOWN) nav->selection = (nav->selection + 1) % 4;
+        if (input == WORKOUT_INPUT_UP) nav->selection = (nav->selection + 4) % 5;
+        if (input == WORKOUT_INPUT_DOWN) nav->selection = (nav->selection + 1) % 5;
         if (input != WORKOUT_INPUT_OK) return WORKOUT_ACTION_NONE;
-        nav->view = nav->selection == 1 ? WORKOUT_VIEW_NETWORK
-                  : nav->selection == 3 ? WORKOUT_VIEW_FUTURE : WORKOUT_VIEW_DASHBOARD;
+        nav->view = nav->selection == 1 ? WORKOUT_VIEW_AI : nav->selection == 2 ? WORKOUT_VIEW_NETWORK
+                  : nav->selection == 4 ? WORKOUT_VIEW_FUTURE : WORKOUT_VIEW_DASHBOARD;
         nav->setup_step = 0;
-        if (nav->selection == 1) return WORKOUT_ACTION_SETUP_START;
-        if (nav->selection == 2) return WORKOUT_ACTION_SYNC;
+        if (nav->selection == 2) return WORKOUT_ACTION_SETUP_START;
+        if (nav->selection == 3) return WORKOUT_ACTION_SYNC;
+    } else if (nav->view == WORKOUT_VIEW_AI) {
+        if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) {
+            nav->ai_provider ^= 1;
+            nav->ai_weekly = false;
+        }
+        if (input == WORKOUT_INPUT_OK) nav->ai_weekly = !nav->ai_weekly;
     } else if (nav->view == WORKOUT_VIEW_NETWORK) {
         if (input == WORKOUT_INPUT_CLEAR) nav->view = WORKOUT_VIEW_CLEAR;
         if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) nav->setup_step ^= 1;

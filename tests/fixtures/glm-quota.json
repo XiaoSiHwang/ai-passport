@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "data": {
+    "level": "PRO",
+    "five_hour": {"remaining_percent": 0, "reset_at": null},
+    "seven_day": {"remaining_percent": 81, "reset_at": "2026-10-07T09:00:00+08:00"},
+    "fetched_at": "2026-10-02T14:32:00+08:00",
+    "stale": true
+  },
+  "error": null
+}

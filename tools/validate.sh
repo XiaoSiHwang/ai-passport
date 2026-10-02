@@ -38,8 +38,12 @@ run_static_checks() {
         tests/test_workout_model.c main/workout_model.c \
         -o "${test_dir}/test_workout_model"
     "${test_dir}/test_workout_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ai_quota.c main/ai_quota.c main/workout_model.c \
+        -o "${test_dir}/test_ai_quota"
+    "${test_dir}/test_ai_quota"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/workout_stubs -Imain \
-        tests/test_workout_store.c main/workout_store.c main/workout_model.c \
+        tests/test_workout_store.c main/workout_store.c main/workout_model.c main/ai_quota.c \
         -o "${test_dir}/test_workout_store"
     "${test_dir}/test_workout_store"
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_workout_fonts.py
@@ -97,9 +101,14 @@ run_firmware_checks() (
         -c "${IDF_PATH}/components/json/cJSON/cJSON.c" -o "${validation_build_dir}/cjson_host.o"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         -I"${IDF_PATH}/components/json/cJSON" tests/test_workout_json.c \
-        main/workout_json.c main/workout_model.c "${validation_build_dir}/cjson_host.o" \
+        main/workout_json.c main/workout_model.c main/ai_quota.c "${validation_build_dir}/cjson_host.o" \
         -lm -o "${validation_build_dir}/test_workout_json"
     "${validation_build_dir}/test_workout_json"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        -I"${IDF_PATH}/components/json/cJSON" tests/test_ai_quota_json.c \
+        main/workout_json.c main/workout_model.c main/ai_quota.c "${validation_build_dir}/cjson_host.o" \
+        -lm -o "${validation_build_dir}/test_ai_quota_json"
+    "${validation_build_dir}/test_ai_quota_json"
 
     SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
         idf.py -B "${validation_build_dir}" \

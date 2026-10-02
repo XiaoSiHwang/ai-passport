@@ -6,6 +6,7 @@ typedef struct {
     workout_navigation_t navigation;
     workout_data_t data;
     workout_network_status_t network;
+    ai_quota_update_t quota;
     bool has_data;
     bool from_cache;
     int battery;
