@@ -1,16 +1,17 @@
 idf_component_register(
     SRCS "main.c"
-         "demo_navigation.c"
-         "ui_pixel.c"
-         "ui_pixel_math.c"
-         "demo_display.c"
-         "demo_button.c"
-         "demo_audio.c"
-         "demo_battery.c"
-         "demo_radio.c"
-         "demo_wifi.c"
-         "demo_ble.c"
-         "demo_low_power.c"
-    INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash
+         "workout_model.c"
+         "workout_json.c"
+         "workout_store.c"
+         "workout_network.c"
+         "workout_portal.c"
+         "workout_ui.c"
+         "../assets/fonts/workout_font_12.c"
+         "../assets/fonts/workout_font_16.c"
+         "../assets/fonts/workout_font_20.c"
+         "../assets/fonts/workout_digits_35.c"
+    INCLUDE_DIRS "." "../assets/fonts"
+    REQUIRES bsp esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash
+             esp_http_client esp_http_server json mbedtls esp_pm
+    EMBED_TXTFILES "workout_setup.html"
 )

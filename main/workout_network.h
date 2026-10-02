@@ -1,0 +1,44 @@
+#pragma once
+
+#include "workout_model.h"
+#include "esp_err.h"
+
+typedef enum {
+    WORKOUT_NET_OK, WORKOUT_NET_OFFLINE, WORKOUT_NET_HTTP,
+    WORKOUT_NET_RESPONSE, WORKOUT_NET_INIT, WORKOUT_NET_STORAGE,
+} workout_network_error_t;
+
+typedef enum {
+    WORKOUT_SETUP_WAITING, WORKOUT_SETUP_CONNECTING, WORKOUT_SETUP_SAVED,
+    WORKOUT_SETUP_BAD_WIFI, WORKOUT_SETUP_STORAGE, WORKOUT_SETUP_FAILED,
+    WORKOUT_SETUP_EXPIRED,
+} workout_setup_result_t;
+
+typedef struct {
+    uint32_t revision;
+    bool online;
+    bool syncing;
+    bool has_config;
+    bool setup_active;
+    bool pending;
+    bool cache_error;
+    int http_status;
+    workout_network_error_t error;
+    workout_setup_result_t setup_result;
+    char ap_ssid[24];
+    char ap_password[13];
+    char token[33];
+} workout_network_status_t;
+
+typedef struct {
+    bool available;
+    bool persisted;
+    workout_data_t data;
+} workout_network_update_t;
+
+/* App-lifetime services; no worker/callback holds pointers to LVGL objects. */
+esp_err_t workout_network_start(const workout_config_t *config, const workout_cache_t *cache);
+bool workout_network_request(workout_action_t action);
+bool workout_network_submit(const workout_config_t *config, const char *token);
+void workout_network_status(workout_network_status_t *status);
+bool workout_network_take_update(workout_network_update_t *update);

@@ -1,0 +1,16 @@
+#pragma once
+
+#include "workout_network.h"
+
+typedef struct {
+    workout_navigation_t navigation;
+    workout_data_t data;
+    workout_network_status_t network;
+    bool has_data;
+    bool from_cache;
+    int battery;
+} workout_ui_state_t;
+
+/* All calls require the LVGL lock; one screen, owned for the app lifetime. */
+bool workout_ui_create(void);
+void workout_ui_update(const workout_ui_state_t *state);

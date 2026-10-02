@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>运动看板 · 网络配置</title>
+<style>
+:root{color-scheme:light;--bg:#eef1e8;--ink:#1b3028;--panel:#dce3d5;--muted:#4c6254;--accent:#316644;--error:#9a2525}
+*{box-sizing:border-box}body{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px 20px}main{max-width:440px;margin:auto}h1{font-size:28px;margin:16px 0 8px}p{color:var(--muted)}label{display:block;margin-top:22px;font-weight:600}input{width:100%;border:2px solid var(--muted);border-radius:0;padding:12px;background:#fff;color:var(--ink);font:inherit;margin-top:6px;min-height:48px}small{display:block;color:var(--muted);margin-top:6px}.show{display:flex;align-items:center;gap:10px;font-weight:400;margin-top:10px;min-height:44px}.show input{width:20px;min-height:20px;margin:0}button{width:100%;min-height:48px;border:0;background:var(--accent);color:#fff;font:inherit;font-weight:600;margin-top:28px;padding:12px;box-shadow:4px 4px 0 var(--ink)}button:disabled{opacity:.6;box-shadow:none}button:active{box-shadow:none}#status{padding:16px;background:var(--panel);white-space:pre-line;overflow-wrap:anywhere}#status:empty{display:none}.error{color:var(--error)}.tiles{display:flex;gap:4px;margin:28px 0}.tiles span{width:20px;height:12px;background:var(--accent)}.tiles span:nth-last-child(-n+3){background:var(--panel)}
+</style>
+</head>
+<body><main>
+<div class="tiles" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+<h1>让运动看板联网</h1>
+<p>连接你的 2.4 GHz Wi-Fi，并配置运动数据接口。连接成功后才保存网络设置。</p>
+<form id="settings">
+<label for="ssid">Wi-Fi 名称</label><input id="ssid" name="ssid" autocomplete="off" required maxlength="32" aria-describedby="ssid-help"><small id="ssid-help">名称区分大小写；中文名称最多占 32 个 UTF-8 字节。</small>
+<label for="password">Wi-Fi 密码</label><input id="password" name="password" type="password" autocomplete="new-password" maxlength="63" aria-describedby="password-help"><small id="password-help">8–63 个字符；开放网络留空。</small>
+<label class="show"><input id="show" type="checkbox">显示密码</label>
+<label for="server">后端地址</label><input id="server" name="server" type="url" inputmode="url" autocomplete="off" required maxlength="191" placeholder="http://192.168.1.20:8000" aria-describedby="server-help"><small id="server-help">填写电脑的局域网地址；也可以填写完整的 /api/workout 接口地址。电脑和设备需要在同一可互通的网络。</small>
+<button id="submit" type="submit">连接并保存</button>
+</form>
+<p id="status" role="status" aria-live="polite"></p>
+</main>
+<script>
+const token=new URLSearchParams(location.search).get('token')||'';
+const form=document.getElementById('settings'),status=document.getElementById('status'),submit=document.getElementById('submit');
+document.getElementById('show').addEventListener('change',event=>{document.getElementById('password').type=event.target.checked?'text':'password'});
+let polling=false;
+function message(text,error=false){status.textContent=text;status.classList.toggle('error',error)}
+function idle(){polling=false;submit.disabled=false;submit.textContent='连接并保存'}
+async function poll(){
+ if(!polling)return;
+ try{
+  const response=await fetch('/api/status?token='+encodeURIComponent(token),{cache:'no-store'});
+  if(!response.ok)throw new Error();
+  const data=await response.json();
+  if(data.result==='saved'){polling=false;message('网络配置已保存，正在同步运动数据。\n设备热点即将关闭；同步结果请查看设备屏幕。');submit.textContent='已保存';return}
+  if(['bad_wifi','storage','failed','expired'].includes(data.result)){message(data.result==='bad_wifi'?'连接失败。请检查密码、2.4 GHz 网络和路由器距离，再重新提交。':data.result==='storage'?'设备未能保存设置，请重试。':'配网会话已结束，请重新扫描设备上的二维码。',true);idle();return}
+  setTimeout(poll,1500);
+ }catch(error){polling=false;message('与设备的连接已中断。连接路由器时热点可能切换频道，请先查看设备屏幕；若尚未成功，再连接设备热点并重新扫码。',true);idle()}
+}
+form.addEventListener('submit',async event=>{
+ event.preventDefault();
+ if(!form.reportValidity())return;
+ const ssid=document.getElementById('ssid').value,password=document.getElementById('password').value,server=document.getElementById('server').value.trim();
+ if(new TextEncoder().encode(ssid).length>32){message('Wi-Fi 名称超过 32 字节，请检查。',true);document.getElementById('ssid').focus();return}
+ const passwordBytes=new TextEncoder().encode(password).length;
+ if(passwordBytes&&(passwordBytes<8||passwordBytes>63)){message('Wi-Fi 密码必须为 8–63 字节。',true);document.getElementById('password').focus();return}
+ submit.disabled=true;submit.textContent='正在连接…';message('正在验证 Wi-Fi。连接成功后自动保存，请等待约 20 秒。');
+ try{
+  const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password,server,token})});
+  if(!response.ok){message(response.status===400?'配置格式不正确。请检查 Wi-Fi 和后端地址；不要使用 localhost 或 127.0.0.1。':'配网会话已失效或设备正忙，请稍后重试，必要时重新扫码。',true);idle();return}
+  polling=true;setTimeout(poll,1500);
+ }catch(error){message('发送失败。请确认手机仍连接设备热点，再重试。',true);idle()}
+});
+</script></body></html>

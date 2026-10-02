@@ -17,6 +17,33 @@ Store reusable font files and generated font sources in `fonts/`.
 - Check Flash and internal-RAM impact before adding a font; the ESP32-C3 has no PSRAM.
 - Do not commit fonts whose license does not permit redistribution.
 
+The workout application uses `fonts/workout_font_12.c`, `workout_font_16.c` and
+`workout_font_20.c`: uncompressed 2 bpp subsets of Noto Sans CJK SC Regular,
+licensed under the [SIL Open Font License](fonts/NotoSansCJKsc-OFL.txt). Source:
+[Noto CJK](https://github.com/notofonts/noto-cjk/blob/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf).
+The input OTF SHA-256 is
+`2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`.
+It is not necessary to compile or retain the full OTF in firmware.
+
+Printable ASCII and the fixed Chinese inventory are in `fonts/workout_symbols.txt`.
+`fonts/workout_font_inventory.h` drives runtime glyph checks; static tests check
+each generated cmap. Compile all three sources through `main/CMakeLists.txt`.
+Dynamic network names stay on the phone configuration page; this subset does not
+claim arbitrary Chinese coverage.
+
+Regenerate with the official `lv_font_conv` **1.5.3** CLI entry point:
+
+```text
+python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --converter <lv_font_conv.js>
+```
+
+The script collects UI characters, selects sizes 12/16/20, 2 bpp, no compression
+and no kerning. It also generates `fonts/workout_digits_35.c`, an original 1 bpp
+35 px pixel numeral font under this repository's MIT license. The maintained
+5×7 digit patterns live in the script. Rerun the generator after adding Chinese
+UI text; `tests/test_workout_fonts.py` detects an outdated inventory. Real-device
+Chinese rendering and runtime network heap use remain separate checks.
+
 ## Images
 
 Store reusable source images and generated display assets in `images/`.

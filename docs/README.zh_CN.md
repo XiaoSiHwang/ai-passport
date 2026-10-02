@@ -33,6 +33,9 @@
 **FoloToy AI Passport** 是开放的可穿戴 AI 平台，人人都可以动手改造、自由创作。
 从一个简单想法开始，打造专属体验——无论是随身伙伴、小工具、游戏，还是任何新点子。
 
+当前应用分支运行[运动看板](assets/workout-dashboard.zh_CN.md)。下文基线说明仍作为
+上游 `main` 的参考。
+
 <p align="center">
   <img src="../assets/images/home.jpg" alt="FoloToy AI Passport 可穿戴设备的正面、侧面和背面展示。" width="100%">
 </p>
@@ -204,6 +207,7 @@ LICENSE                  仓库许可证
 | [硬件资料](hardware-design/README.zh_CN.md) | 板卡事实、接口边界、验收清单与排障 |
 | [中文字体](development/engineering/lvgl-chinese-fonts.zh_CN.md) | 字形覆盖、控件字体选择，以及中文空白排查 |
 | [Wi-Fi 配网](development/engineering/wifi-provisioning.zh_CN.md) | 蓝牙配网实现参考与配套小程序 |
+| [运动看板](assets/workout-dashboard.zh_CN.md) | 马赛克运动界面、热点扫码配置、离线快照和按键操作 |
 | [社区作品与经验](reference/README.zh_CN.md) | `docs/reference/<username>/` 下的应用档案和可复用知识 |
 | [参与贡献](contribution/README.zh_CN.md) | 文档、提交与 Pull Request 约定 |
 | [品牌素材](brand/README.zh_CN.md) | 产品视觉参考与[品牌说明](brand/brand-and-product.zh_CN.md) |

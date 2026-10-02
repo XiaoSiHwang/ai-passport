@@ -11,6 +11,8 @@ usage() {
 run_static_checks() {
     local actionlint_bin
     local test_dir
+    local gc_flag="-Wl,--gc-sections"
+    if [[ "$(uname -s)" == "Darwin" ]]; then gc_flag="-Wl,-dead_strip"; fi
 
     python3 tools/check_repo.py
 
@@ -32,6 +34,15 @@ run_static_checks() {
         tests/test_demo_navigation.c main/demo_navigation.c \
         -o "${test_dir}/test_demo_navigation"
     "${test_dir}/test_demo_navigation"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_workout_model.c main/workout_model.c \
+        -o "${test_dir}/test_workout_model"
+    "${test_dir}/test_workout_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/workout_stubs -Imain \
+        tests/test_workout_store.c main/workout_store.c main/workout_model.c \
+        -o "${test_dir}/test_workout_store"
+    "${test_dir}/test_workout_store"
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_workout_fonts.py
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \
         tests/test_bsp_display_rounding.c components/bsp/src/bsp_display_rounding.c \
         -o "${test_dir}/test_bsp_display_rounding"
@@ -57,7 +68,7 @@ run_static_checks() {
     for demo in audio low_power ble wifi; do
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
             -ffunction-sections -fdata-sections -Itests/demo_stubs -Imain \
-            "tests/test_demo_${demo}_runtime.c" -Wl,--gc-sections \
+            "tests/test_demo_${demo}_runtime.c" "${gc_flag}" \
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
@@ -81,9 +92,21 @@ run_firmware_checks() (
     validation_build_dir="$(mktemp -d /tmp/ai-passport-firmware.XXXXXX)"
     trap 'case "${validation_build_dir}" in /tmp/ai-passport-firmware.*) rm -rf -- "${validation_build_dir}" ;; esac' EXIT
 
+    # Exercise the decoder with the same cJSON source used by ESP-IDF, without vendoring it.
+    "${CC:-cc}" -std=c11 -Wno-deprecated-declarations \
+        -c "${IDF_PATH}/components/json/cJSON/cJSON.c" -o "${validation_build_dir}/cjson_host.o"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        -I"${IDF_PATH}/components/json/cJSON" tests/test_workout_json.c \
+        main/workout_json.c main/workout_model.c "${validation_build_dir}/cjson_host.o" \
+        -lm -o "${validation_build_dir}/test_workout_json"
+    "${validation_build_dir}/test_workout_json"
+
     SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
         idf.py -B "${validation_build_dir}" \
         -D "SDKCONFIG=${validation_build_dir}/sdkconfig" build
+    cmake -S tests/workout_ui -B "${validation_build_dir}/host-ui"
+    cmake --build "${validation_build_dir}/host-ui" --parallel 8
+    (cd "${validation_build_dir}" && ./host-ui/workout_ui_host)
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"
     python3 tools/verify_firmware.py "${validation_build_dir}"

@@ -15,6 +15,31 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+运动应用使用 `fonts/workout_font_12.c`、`workout_font_16.c` 和
+`workout_font_20.c`，来自 Noto Sans CJK SC Regular，为未压缩的 2 bpp 子集，
+遵循 [SIL 开放字体许可证](fonts/NotoSansCJKsc-OFL.txt)。来源：
+[Noto CJK](https://github.com/notofonts/noto-cjk/blob/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf)。
+输入 OTF 的 SHA-256 为
+`2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`。
+固件不需要编译或保留完整 OTF。
+
+可打印 ASCII 和固定中文字符集保存在 `fonts/workout_symbols.txt`。
+`fonts/workout_font_inventory.h` 用于运行时字形检查，静态测试检查各字体生成的 cmap。
+三个字体源文件通过 `main/CMakeLists.txt` 编译。任意网络名称仅在手机配置页显示，
+这个子集不声明支持任意中文。
+
+使用官方 `lv_font_conv` **1.5.3** 的 CLI 入口重新生成：
+
+```text
+python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --converter <lv_font_conv.js>
+```
+
+脚本收集界面字符，选择 12 / 16 / 20 px、2 bpp、不压缩、无字距调整。同时生成
+`fonts/workout_digits_35.c`，它是按仓库 MIT 许可证提供的原创 1 bpp、35 px 像素
+数字字体；5×7 数字图案在脚本中维护。新增中文文案后重新生成，
+`tests/test_workout_fonts.py` 会检测过期字符集。真机中文显示和联网时的堆内存
+仍需分别验证。
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。

@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "data": {
+    "year": 2026,
+    "month": 10,
+    "monthly": {
+      "distance_km": 14.0,
+      "duration_seconds": 5151,
+      "average_pace_seconds_per_km": 367,
+      "goal_distance_km": 100,
+      "weeks": [
+        {"week": 1, "distance_km": 14}, {"week": 2, "distance_km": 0},
+        {"week": 3, "distance_km": 0}, {"week": 4, "distance_km": 0},
+        {"week": 5, "distance_km": 0}
+      ]
+    },
+    "weekly": {
+      "week_start": "2026-09-28", "week_end": "2026-10-04",
+      "distance_km": 24.6, "duration_seconds": 9028,
+      "average_pace_seconds_per_km": 367, "goal_distance_km": 30,
+      "days": [
+        {"weekday": 1, "date": "2026-09-28", "distance_km": 5.2},
+        {"weekday": 2, "date": "2026-09-29", "distance_km": 0},
+        {"weekday": 3, "date": "2026-09-30", "distance_km": 5.4},
+        {"weekday": 4, "date": "2026-10-01", "distance_km": 0},
+        {"weekday": 5, "date": "2026-10-02", "distance_km": 14},
+        {"weekday": 6, "date": "2026-10-03", "distance_km": 0},
+        {"weekday": 7, "date": "2026-10-04", "distance_km": 0}
+      ]
+    },
+    "updated_at": "2026-10-02T10:30:00+08:00", "stale": false
+  },
+  "error": null
+}
