@@ -14,6 +14,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -39,6 +40,12 @@ static EventGroupHandle_t s_events;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static workout_network_status_t s_status;
 static workout_config_t s_config, s_candidate;
+static workout_profiles_t s_profiles, s_profile_candidate;
+static workout_retry_t s_retry;
+static bool s_profile_error, s_manual_switch;
+static bool s_profile_dirty;
+static int64_t s_next_profile_save;
+static char s_expected_ssid[33];
 static workout_cache_t s_cache;
 static ai_quota_cache_t s_quota_cache[AI_QUOTA_PROVIDERS];
 static ai_quota_update_t s_quota;
@@ -48,10 +55,11 @@ static bool s_time_started;
 static esp_netif_t *s_sta, *s_ap;
 static esp_event_handler_instance_t s_wifi_handler, s_ip_handler;
 static bool s_wifi_registered, s_ip_registered;
-static int64_t s_next_sync, s_next_connect, s_setup_deadline, s_pending_deadline, s_close_at;
+static int64_t s_next_sync, s_setup_deadline, s_pending_deadline, s_close_at;
 
 typedef struct {
     int kind;
+    unsigned selection;
     workout_config_t config;
 } network_command_t;
 
@@ -86,16 +94,59 @@ static void setup_result(workout_setup_result_t result, bool pending) {
     portEXIT_CRITICAL(&s_status_lock);
 }
 
+static void profiles_publish(void) {
+    portENTER_CRITICAL(&s_status_lock);
+    s_status.wifi_count = s_profiles.wifi_count;
+    s_status.server_count = s_profiles.server_count;
+    s_status.active_wifi = s_profiles.active_wifi;
+    s_status.active_server = s_profiles.active_server;
+    memset(s_status.wifi_names, 0, sizeof(s_status.wifi_names));
+    for (unsigned i = 0; i < s_profiles.wifi_count; i++)
+        memcpy(s_status.wifi_names[i], s_profiles.wifi[i].ssid, sizeof(s_status.wifi_names[i]));
+    memcpy(s_status.servers, s_profiles.servers, sizeof(s_status.servers));
+    s_status.has_config = s_profiles.wifi_count != 0;
+    s_status.revision++;
+    portEXIT_CRITICAL(&s_status_lock);
+}
+
+static void switch_result(workout_switch_result_t result) {
+    portENTER_CRITICAL(&s_status_lock);
+    s_status.switch_result = result;
+    s_status.profile_busy = result == WORKOUT_SWITCH_CONNECTING;
+    s_status.revision++;
+    portEXIT_CRITICAL(&s_status_lock);
+}
+
+static void retry_publish(void) {
+    portENTER_CRITICAL(&s_status_lock);
+    s_status.connecting = s_retry.waiting;
+    s_status.exhausted = s_retry.exhausted;
+    s_status.connecting_wifi = s_retry.index;
+    s_status.attempted = s_retry.attempted;
+    s_status.revision++;
+    portEXIT_CRITICAL(&s_status_lock);
+}
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)data;
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        /* A delayed DHCP event from an abandoned attempt must not save that candidate. */
+        wifi_ap_record_t access;
+        if (esp_wifi_sta_get_ap_info(&access) != ESP_OK) return;
+        portENTER_CRITICAL(&s_status_lock);
+        bool expected = strncmp((const char *)access.ssid, s_expected_ssid, sizeof(access.ssid)) == 0;
+        portEXIT_CRITICAL(&s_status_lock);
+        if (!expected) return;
         xEventGroupClearBits(s_events, DISCONNECTED_BIT);
         xEventGroupSetBits(s_events, CONNECTED_BIT | JUST_CONNECTED_BIT);
         portENTER_CRITICAL(&s_status_lock);
         s_status.online = true;
         s_status.revision++;
         portEXIT_CRITICAL(&s_status_lock);
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    } else if ((base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
+               || (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP)) {
+        wifi_ap_record_t access;
+        if (base == WIFI_EVENT && esp_wifi_sta_get_ap_info(&access) == ESP_OK) return;
         xEventGroupClearBits(s_events, CONNECTED_BIT);
         xEventGroupSetBits(s_events, DISCONNECTED_BIT);
         portENTER_CRITICAL(&s_status_lock);
@@ -132,7 +183,7 @@ static esp_err_t wifi_init(void) {
         s_wifi_registered = err == ESP_OK;
     }
     if (err == ESP_OK) {
-        err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL, &s_ip_handler);
+        err = esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL, &s_ip_handler);
         s_ip_registered = err == ESP_OK;
     }
     if (err == ESP_OK) err = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -146,6 +197,7 @@ static esp_err_t connect_config(const workout_config_t *config) {
     esp_wifi_disconnect();
     xEventGroupClearBits(s_events, CONNECTED_BIT | DISCONNECTED_BIT | JUST_CONNECTED_BIT);
     portENTER_CRITICAL(&s_status_lock);
+    memcpy(s_expected_ssid, config->ssid, sizeof(s_expected_ssid));
     s_status.online = false;
     s_status.revision++;
     portEXIT_CRITICAL(&s_status_lock);
@@ -156,8 +208,20 @@ static esp_err_t connect_config(const workout_config_t *config) {
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &station);
     memset(&station, 0, sizeof(station));
     if (err == ESP_OK) err = esp_wifi_connect();
-    s_next_connect = now_ms() + RECONNECT_INTERVAL_MS;
     return err;
+}
+
+static void connect_profile(unsigned index) {
+    workout_config_t config = s_config;
+    memcpy(config.ssid, s_profiles.wifi[index].ssid, sizeof(config.ssid));
+    memcpy(config.password, s_profiles.wifi[index].password, sizeof(config.password));
+    (void)connect_config(&config);
+    memset(&config, 0, sizeof(config));
+}
+
+static void retry_start(unsigned preferred) {
+    workout_retry_start(&s_retry, preferred, now_ms());
+    retry_publish();
 }
 
 static void heap_log(const char *phase) {
@@ -216,9 +280,30 @@ static void start_setup(void) {
 }
 
 bool workout_network_request(workout_action_t action) {
-    if (!s_commands || action == WORKOUT_ACTION_NONE) return false;
+    if (!s_commands || action == WORKOUT_ACTION_NONE || action == WORKOUT_ACTION_SWITCH_WIFI
+        || action == WORKOUT_ACTION_SWITCH_SERVER) return false;
     const network_command_t command = {.kind = action};
     return xQueueSend(s_commands, &command, 0) == pdTRUE;
+}
+
+bool workout_network_select(workout_action_t action, unsigned selection) {
+    if (!s_commands || (action != WORKOUT_ACTION_SWITCH_WIFI && action != WORKOUT_ACTION_SWITCH_SERVER))
+        return false;
+    portENTER_CRITICAL(&s_status_lock);
+    unsigned count = action == WORKOUT_ACTION_SWITCH_WIFI ? s_status.wifi_count : s_status.server_count;
+    bool accepted = selection < count && !s_status.pending && !s_status.profile_busy && !s_status.setup_active;
+    if (accepted) {
+        s_status.profile_busy = true;
+        s_status.switch_result = WORKOUT_SWITCH_CONNECTING;
+        if (action == WORKOUT_ACTION_SWITCH_WIFI) s_status.connecting_wifi = selection;
+        s_status.revision++;
+    }
+    portEXIT_CRITICAL(&s_status_lock);
+    if (!accepted) return false;
+    const network_command_t command = {.kind = action, .selection = selection};
+    if (xQueueSend(s_commands, &command, 0) == pdTRUE) return true;
+    switch_result(WORKOUT_SWITCH_IDLE);
+    return false;
 }
 
 bool workout_network_submit(const workout_config_t *config, const char *token) {
@@ -226,7 +311,7 @@ bool workout_network_submit(const workout_config_t *config, const char *token) {
     unsigned difference = 0;
     portENTER_CRITICAL(&s_status_lock);
     for (unsigned i = 0; i < 32; i++) difference |= (unsigned char)token[i] ^ (unsigned char)s_status.token[i];
-    bool accepted = s_status.setup_active && !s_status.pending && difference == 0;
+    bool accepted = s_status.setup_active && !s_status.pending && !s_status.profile_busy && difference == 0;
     if (accepted) { s_status.pending = true; s_status.setup_result = WORKOUT_SETUP_CONNECTING; s_status.revision++; }
     portEXIT_CRITICAL(&s_status_lock);
     if (!accepted) return false;
@@ -398,34 +483,167 @@ static void sync_data(void) {
 static void cancel_candidate(workout_setup_result_t result) {
     s_pending_deadline = 0;
     memset(&s_candidate, 0, sizeof(s_candidate));
-    if (s_config.ssid[0]) connect_config(&s_config);
+    if (s_config.ssid[0]) {
+        retry_start(s_profiles.active_wifi);
+        (void)workout_retry_next(&s_retry, s_profiles.wifi_count, now_ms());
+        connect_profile(s_retry.index);
+        retry_publish();
+    }
     else esp_wifi_disconnect();
     setup_result(result, false);
 }
 
-static void confirm_candidate(void) {
-    if (workout_store_save_config(&s_candidate) != ESP_OK) {
-        cancel_candidate(WORKOUT_SETUP_STORAGE);
-        return;
-    }
-    uint32_t source = workout_checksum(s_candidate.server, strlen(s_candidate.server));
-    bool new_source = s_cache.magic && s_cache.source != source;
-    s_config = s_candidate;
+static void activate_config(const workout_config_t *config) {
+    bool new_source = strcmp(s_config.server, config->server) != 0;
+    s_config = *config;
     quota_source_changed();
-    memset(&s_candidate, 0, sizeof(s_candidate));
-    s_pending_deadline = 0;
     if (new_source) {
         memset(&s_cache, 0, sizeof(s_cache));
         s_persisted = false;
         const workout_network_update_t update = {0};
         xQueueOverwrite(s_updates, &update);
     }
-    portENTER_CRITICAL(&s_status_lock);
-    s_status.has_config = true;
-    portEXIT_CRITICAL(&s_status_lock);
+    s_next_sync = 0;
+}
+
+static void confirm_candidate(void) {
+    s_profile_candidate = s_profiles;
+    if (s_profile_error || !workout_profiles_add(&s_profile_candidate, &s_candidate)
+        || workout_store_save_profiles(&s_profile_candidate) != ESP_OK) {
+        cancel_candidate(WORKOUT_SETUP_STORAGE);
+        memset(&s_profile_candidate, 0, sizeof(s_profile_candidate));
+        return;
+    }
+    s_profiles = s_profile_candidate;
+    s_profile_dirty = false;
+    activate_config(&s_candidate);
+    memset(&s_profile_candidate, 0, sizeof(s_profile_candidate));
+    memset(&s_candidate, 0, sizeof(s_candidate));
+    s_pending_deadline = 0;
+    s_retry.waiting = s_retry.exhausted = false;
+    s_retry.index = s_profiles.active_wifi;
+    profiles_publish();
+    retry_publish();
     setup_result(WORKOUT_SETUP_SAVED, false);
     s_close_at = now_ms() + 10000;
-    s_next_sync = 0;
+}
+
+static void confirm_profile(void) {
+    unsigned index = s_retry.index;
+    bool changed = s_profiles.active_wifi != index;
+    s_profile_candidate = s_profiles;
+    s_profile_candidate.active_wifi = index;
+    workout_profiles_seal(&s_profile_candidate);
+    if (changed && workout_store_save_profiles(&s_profile_candidate) != ESP_OK) {
+        if (s_manual_switch) {
+            s_manual_switch = false;
+            switch_result(WORKOUT_SWITCH_STORAGE);
+            esp_wifi_disconnect();
+            xEventGroupClearBits(s_events, CONNECTED_BIT | JUST_CONNECTED_BIT);
+            portENTER_CRITICAL(&s_status_lock);
+            s_status.online = false;
+            s_status.revision++;
+            portEXIT_CRITICAL(&s_status_lock);
+            retry_start(s_profiles.active_wifi);
+            memset(&s_profile_candidate, 0, sizeof(s_profile_candidate));
+            return;
+        }
+        /* Keep an automatically recovered connection usable; retry its preference write later. */
+        s_profile_dirty = true;
+        s_next_profile_save = now_ms() + RECONNECT_INTERVAL_MS;
+        switch_result(WORKOUT_SWITCH_STORAGE);
+    } else if (changed) s_profile_dirty = false;
+    s_profiles = s_profile_candidate;
+    (void)workout_profiles_config(&s_profiles, &s_config);
+    memset(&s_profile_candidate, 0, sizeof(s_profile_candidate));
+    s_retry.waiting = s_retry.exhausted = false;
+    profiles_publish();
+    retry_publish();
+    if (s_manual_switch) switch_result(WORKOUT_SWITCH_SAVED);
+    s_manual_switch = false;
+}
+
+static void select_profile(const network_command_t *command) {
+    workout_network_status_t status;
+    workout_network_status(&status);
+    if (s_pending_deadline || status.setup_active || s_profile_error) {
+        switch_result(s_profile_error ? WORKOUT_SWITCH_STORAGE : WORKOUT_SWITCH_FAILED);
+        return;
+    }
+    if (command->kind == WORKOUT_ACTION_SWITCH_WIFI) {
+        if (command->selection >= s_profiles.wifi_count) { switch_result(WORKOUT_SWITCH_FAILED); return; }
+        s_manual_switch = true;
+        retry_start(command->selection);
+        (void)workout_retry_next(&s_retry, s_profiles.wifi_count, now_ms());
+        connect_profile(command->selection);
+        retry_publish();
+        return;
+    }
+    if (command->selection >= s_profiles.server_count) { switch_result(WORKOUT_SWITCH_FAILED); return; }
+    s_profile_candidate = s_profiles;
+    s_profile_candidate.active_server = command->selection;
+    workout_profiles_seal(&s_profile_candidate);
+    if ((s_profile_candidate.active_server != s_profiles.active_server || s_profile_dirty)
+        && workout_store_save_profiles(&s_profile_candidate) != ESP_OK) {
+        switch_result(WORKOUT_SWITCH_STORAGE);
+    } else {
+        s_profiles = s_profile_candidate;
+        workout_config_t config;
+        (void)workout_profiles_config(&s_profiles, &config);
+        activate_config(&config);
+        memset(&config, 0, sizeof(config));
+        s_profile_dirty = false;
+        profiles_publish();
+        network_error(status.online ? WORKOUT_NET_OK : WORKOUT_NET_OFFLINE, 0);
+        switch_result(WORKOUT_SWITCH_SAVED);
+    }
+    memset(&s_profile_candidate, 0, sizeof(s_profile_candidate));
+}
+
+static void retry_tick(int64_t now, EventBits_t bits) {
+    if (bits & CONNECTED_BIT) {
+        if (s_retry.waiting) confirm_profile();
+        if (s_profile_dirty && now >= s_next_profile_save) {
+            s_next_profile_save = now + RECONNECT_INTERVAL_MS;
+            if (workout_store_save_profiles(&s_profiles) == ESP_OK) {
+                s_profile_dirty = false;
+                switch_result(WORKOUT_SWITCH_SAVED);
+            }
+        }
+        return;
+    }
+    if (!s_profiles.wifi_count) return;
+    if (s_manual_switch) {
+        if (now < s_retry.deadline) return;
+        s_manual_switch = false;
+        switch_result(WORKOUT_SWITCH_FAILED);
+        retry_start(s_profiles.active_wifi);
+    } else if ((bits & DISCONNECTED_BIT) && !s_retry.waiting && !s_retry.exhausted) {
+        retry_start(s_profiles.active_wifi);
+    }
+    xEventGroupClearBits(s_events, DISCONNECTED_BIT);
+    bool exhausted = s_retry.exhausted;
+    int index = workout_retry_next(&s_retry, s_profiles.wifi_count, now);
+    if (index >= 0) { connect_profile((unsigned)index); retry_publish(); }
+    else if (exhausted != s_retry.exhausted) {
+        esp_wifi_disconnect();
+        retry_publish();
+    }
+}
+
+static void connection_cleared(void) {
+    portENTER_CRITICAL(&s_status_lock);
+    s_status.online = false;
+    s_status.connecting = false;
+    s_status.exhausted = false;
+    s_status.switch_result = WORKOUT_SWITCH_IDLE;
+    s_status.profile_busy = false;
+    s_status.error = WORKOUT_NET_OFFLINE;
+    s_status.http_status = 0;
+    s_status.syncing = false;
+    memset(s_expected_ssid, 0, sizeof(s_expected_ssid));
+    s_status.revision++;
+    portEXIT_CRITICAL(&s_status_lock);
 }
 
 static void clear_config(void) {
@@ -433,12 +651,13 @@ static void clear_config(void) {
     s_pending_deadline = 0;
     memset(&s_candidate, 0, sizeof(s_candidate));
     memset(&s_config, 0, sizeof(s_config));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(&s_retry, 0, sizeof(s_retry));
+    s_profile_error = s_profile_dirty = s_manual_switch = false;
     esp_wifi_disconnect();
-    xEventGroupClearBits(s_events, CONNECTED_BIT);
-    portENTER_CRITICAL(&s_status_lock);
-    s_status.has_config = false;
-    s_status.online = false;
-    portEXIT_CRITICAL(&s_status_lock);
+    xEventGroupClearBits(s_events, CONNECTED_BIT | DISCONNECTED_BIT | JUST_CONNECTED_BIT);
+    connection_cleared();
+    profiles_publish();
     setup_result(WORKOUT_SETUP_WAITING, false);
     s_close_at = 0;
     stop_setup();
@@ -448,10 +667,12 @@ static void clear_config(void) {
 static void process_command(const network_command_t *command) {
     if (!s_ready) {
         s_ready = wifi_init() == ESP_OK;
-        if (!s_ready) { network_error(WORKOUT_NET_INIT, 0); return; }
-        if (s_config.ssid[0]) connect_config(&s_config);
+        if (!s_ready) { network_error(WORKOUT_NET_INIT, 0); switch_result(WORKOUT_SWITCH_FAILED); return; }
+        if (s_config.ssid[0]) retry_start(s_profiles.active_wifi);
     }
-    if (command->kind == WORKOUT_ACTION_SETUP_START) start_setup();
+    if (command->kind == WORKOUT_ACTION_SETUP_START) {
+        if (!s_manual_switch) start_setup();
+    }
     else if (command->kind == WORKOUT_ACTION_SETUP_STOP) {
         if (s_pending_deadline) cancel_candidate(WORKOUT_SETUP_WAITING);
         stop_setup();
@@ -460,7 +681,16 @@ static void process_command(const network_command_t *command) {
             s_next_sync = 0;
             for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
         }
-    } else if (command->kind == WORKOUT_ACTION_CLEAR) clear_config();
+    } else if (command->kind == WORKOUT_ACTION_RECONNECT) {
+        workout_network_status_t status;
+        workout_network_status(&status);
+        if (!s_pending_deadline && !s_manual_switch && !status.setup_active) {
+            if (!(xEventGroupGetBits(s_events) & CONNECTED_BIT)) retry_start(s_profiles.active_wifi);
+            s_next_sync = 0;
+        }
+    } else if (command->kind == WORKOUT_ACTION_SWITCH_WIFI || command->kind == WORKOUT_ACTION_SWITCH_SERVER)
+        select_profile(command);
+    else if (command->kind == WORKOUT_ACTION_CLEAR) clear_config();
     else if (command->kind == COMMAND_APPLY) {
         workout_network_status_t status;
         workout_network_status(&status);
@@ -489,7 +719,9 @@ static void network_tick(void) {
         stop_setup();
         setup_result(WORKOUT_SETUP_EXPIRED, false);
     }
-    if (s_config.ssid[0] && !(bits & CONNECTED_BIT) && now >= s_next_connect) connect_config(&s_config);
+    workout_network_status_t status;
+    workout_network_status(&status);
+    if (!status.setup_active) retry_tick(now, bits);
     if (!s_config.ssid[0]) return;
     /* One request per tick lets provisioning commands run between providers. */
     if (now >= s_next_sync) sync_data();
@@ -502,7 +734,7 @@ static void network_task(void *arg) {
     (void)arg;
     s_ready = wifi_init() == ESP_OK;
     if (s_ready) {
-        if (s_config.ssid[0]) connect_config(&s_config);
+        if (s_config.ssid[0]) retry_start(s_profiles.active_wifi);
         else start_setup();
     } else network_error(WORKOUT_NET_INIT, 0);
     network_command_t command;
@@ -517,6 +749,11 @@ static void network_task(void *arg) {
 
 esp_err_t workout_network_start(const workout_config_t *config, const workout_cache_t *cache) {
     s_config = *config;
+    esp_err_t err = workout_store_load_profiles(&s_profiles);
+    s_profile_error = err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND;
+    if (s_profile_error) s_status.error = WORKOUT_NET_STORAGE;
+    if (err == ESP_OK) (void)workout_profiles_config(&s_profiles, &s_config);
+    profiles_publish();
     if (workout_cache_valid(cache, sizeof(*cache))) { s_cache = *cache; s_persisted = true; }
     s_status.has_config = s_config.ssid[0] != '\0';
     s_events = xEventGroupCreate();

@@ -28,8 +28,12 @@ It is not necessary to compile or retain the full OTF in firmware.
 Printable ASCII and the fixed Chinese inventory are in `fonts/workout_symbols.txt`.
 `fonts/workout_font_inventory.h` drives runtime glyph checks; static tests check
 each generated cmap. Compile all three sources through `main/CMakeLists.txt`.
-Dynamic network names stay on the phone configuration page; this subset does not
-claim arbitrary Chinese coverage.
+Dynamic network names use `fonts/workout_network_font_16.c`, an independent 2 bpp
+Noto CJK font stored in Flash. It includes printable ASCII and available glyphs
+in the CJK punctuation, Extension A, basic CJK and fullwidth ranges. Unsupported
+characters are shown as explicit Unicode codes; no font claims arbitrary Unicode
+coverage. `CONFIG_LV_FONT_FMT_TXT_LARGE=y` is required for its bitmap offsets.
+The LVGL pool stays at 24 KB. Long selected names/URLs scroll in a single label.
 
 Regenerate with the official `lv_font_conv` **1.5.3** CLI entry point:
 
@@ -37,7 +41,9 @@ Regenerate with the official `lv_font_conv` **1.5.3** CLI entry point:
 python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --converter <lv_font_conv.js>
 ```
 
-The script collects UI characters, selects sizes 12/16/20, 2 bpp, no compression
+Add `--network-font` to regenerate the broad dynamic font as well.
+
+The script collects UI characters (including punctuation), selects sizes 12/16/20, 2 bpp, no compression
 and no kerning. It also generates `fonts/workout_digits_35.c`, an original 1 bpp
 35 px pixel numeral font under this repository's MIT license. The maintained
 5×7 digit patterns live in the script. Rerun the generator after adding Chinese

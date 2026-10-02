@@ -117,17 +117,22 @@ static void navigation(void) {
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
-    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SETUP_START);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_NONE);
     assert(nav.view == WORKOUT_VIEW_NETWORK);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_WIFI);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SETUP_START);
+    assert(nav.view == WORKOUT_VIEW_SETUP);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     assert(nav.setup_step == 1);
     workout_navigate(&nav, WORKOUT_INPUT_CLEAR);
     assert(nav.view == WORKOUT_VIEW_CLEAR);
-    assert(workout_navigate(&nav, WORKOUT_INPUT_UP) == WORKOUT_ACTION_NONE);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_UP) == WORKOUT_ACTION_SETUP_STOP);
     assert(nav.view == WORKOUT_VIEW_NETWORK);
     workout_navigate(&nav, WORKOUT_INPUT_CLEAR);
     assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_CLEAR);
     assert(workout_navigate(&nav, WORKOUT_INPUT_MENU) == WORKOUT_ACTION_SETUP_STOP);
+    workout_navigate(&nav, WORKOUT_INPUT_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_UP);
     assert(nav.selection == 4);
     workout_navigate(&nav, WORKOUT_INPUT_OK);
@@ -140,8 +145,35 @@ static void navigation(void) {
     assert(nav.view == WORKOUT_VIEW_DASHBOARD && nav.monthly);
 }
 
+static void profile_navigation(void) {
+    workout_navigation_t nav = {.view = WORKOUT_VIEW_NETWORK, .wifi_count = 5, .server_count = 2};
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_WIFI);
+    workout_navigate(&nav, WORKOUT_INPUT_UP);
+    assert(nav.selection == 4);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SWITCH_WIFI);
+    assert(nav.view == WORKOUT_VIEW_CONNECTION && nav.selection == 4);
+    nav.selection = 0;
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_RECONNECT);
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SETUP_START);
+    assert(nav.view == WORKOUT_VIEW_SETUP);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_MENU) == WORKOUT_ACTION_SETUP_STOP);
+    assert(nav.view == WORKOUT_VIEW_NETWORK);
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_SERVER);
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SWITCH_SERVER && nav.selection == 1);
+    assert(nav.view == WORKOUT_VIEW_SERVER);
+    workout_navigate(&nav, WORKOUT_INPUT_MENU);
+    workout_navigate(&nav, WORKOUT_INPUT_UP);
+    assert(nav.selection == 2);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SETUP_START);
+}
+
 int main(void) {
-    dates(); urls(); cache(); navigation();
+    dates(); urls(); cache(); navigation(); profile_navigation();
     puts("Workout model: PASS");
     return 0;
 }

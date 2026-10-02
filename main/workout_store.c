@@ -32,15 +32,40 @@ esp_err_t workout_store_init(void) {
 }
 
 esp_err_t workout_store_load_config(workout_config_t *config) {
-    esp_err_t err = read_blob("network", config, sizeof(*config));
-    if (err == ESP_OK && !workout_config_valid(config)) err = ESP_ERR_INVALID_ARG;
+    workout_profiles_t profiles;
+    esp_err_t err = workout_store_load_profiles(&profiles);
+    if (err == ESP_OK && !workout_profiles_config(&profiles, config)) err = ESP_ERR_INVALID_ARG;
     if (err != ESP_OK) memset(config, 0, sizeof(*config));
     return err;
 }
 
 esp_err_t workout_store_save_config(const workout_config_t *config) {
     if (!workout_config_valid(config)) return ESP_ERR_INVALID_ARG;
-    return write_blob("network", config, sizeof(*config));
+    workout_profiles_t profiles;
+    esp_err_t err = workout_store_load_profiles(&profiles);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return err;
+    if (!workout_profiles_add(&profiles, config)) return ESP_ERR_INVALID_ARG;
+    return workout_store_save_profiles(&profiles);
+}
+
+esp_err_t workout_store_load_profiles(workout_profiles_t *profiles) {
+    esp_err_t err = read_blob("profiles", profiles, sizeof(*profiles));
+    if (err == ESP_OK && !workout_profiles_valid(profiles)) err = ESP_ERR_INVALID_CRC;
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Only a missing new key permits legacy migration; corruption is not an empty history. */
+        workout_config_t legacy;
+        err = read_blob("network", &legacy, sizeof(legacy));
+        memset(profiles, 0, sizeof(*profiles));
+        if (err == ESP_OK && !workout_profiles_add(profiles, &legacy)) err = ESP_ERR_INVALID_ARG;
+        memset(&legacy, 0, sizeof(legacy));
+    }
+    if (err != ESP_OK) memset(profiles, 0, sizeof(*profiles));
+    return err;
+}
+
+esp_err_t workout_store_save_profiles(const workout_profiles_t *profiles) {
+    if (!workout_profiles_valid(profiles)) return ESP_ERR_INVALID_ARG;
+    return write_blob("profiles", profiles, sizeof(*profiles));
 }
 
 esp_err_t workout_store_clear_config(void) {
@@ -49,6 +74,10 @@ esp_err_t workout_store_clear_config(void) {
     if (err != ESP_OK) return err;
     err = nvs_erase_key(handle, "network");
     if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    if (err == ESP_OK) {
+        err = nvs_erase_key(handle, "profiles");
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    }
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
     return err;

@@ -46,13 +46,28 @@ static void handle_input(workout_input_t input) {
     bsp_display_backlight(100);
     if (waking) return; /* The first key wakes the screen without changing pages. */
     workout_action_t action;
-    if (s_state.navigation.view == WORKOUT_VIEW_NETWORK && input == WORKOUT_INPUT_OK
+    if (s_state.network.profile_busy && input == WORKOUT_INPUT_OK
+        && s_state.navigation.view != WORKOUT_VIEW_DASHBOARD && s_state.navigation.view != WORKOUT_VIEW_AI
+        && s_state.navigation.view != WORKOUT_VIEW_DETAILS && s_state.navigation.view != WORKOUT_VIEW_MENU) {
+        s_state.request_failed = true;
+        refresh();
+        return;
+    }
+    workout_navigation_t previous = s_state.navigation;
+    s_state.request_failed = false;
+    if (s_state.navigation.view == WORKOUT_VIEW_SETUP && input == WORKOUT_INPUT_OK
         && s_state.network.setup_active) {
         s_state.navigation.setup_step ^= 1;
         action = WORKOUT_ACTION_NONE;
     } else action = workout_navigate(&s_state.navigation, input);
-    if (action != WORKOUT_ACTION_NONE && !workout_network_request(action)) {
-        ESP_LOGW(TAG, "Network request not queued; retry from the menu");
+    if (action != WORKOUT_ACTION_NONE) {
+        bool select = action == WORKOUT_ACTION_SWITCH_WIFI || action == WORKOUT_ACTION_SWITCH_SERVER;
+        bool accepted = select ? workout_network_select(action, previous.selection) : workout_network_request(action);
+        if (!accepted) {
+            s_state.request_failed = true;
+            s_state.navigation = previous;
+        } else if (action == WORKOUT_ACTION_SWITCH_WIFI) s_state.navigation.selection = 0;
+        workout_network_status(&s_state.network);
     }
     refresh();
 }
@@ -70,7 +85,16 @@ static void update_network(void) {
     workout_network_status_t status;
     workout_network_status(&status);
     bool changed = status.revision != s_state.network.revision;
+    if (!status.online && status.has_config
+        && (s_state.network.online || (status.exhausted && !s_state.network.exhausted))
+        && s_state.navigation.view == WORKOUT_VIEW_DASHBOARD) {
+        s_state.navigation.view = WORKOUT_VIEW_CONNECTION;
+        s_state.navigation.selection = 0;
+        changed = true;
+    }
     s_state.network = status;
+    s_state.navigation.wifi_count = status.wifi_count;
+    s_state.navigation.server_count = status.server_count;
     workout_network_update_t update;
     if (workout_network_take_update(&update)) {
         s_state.has_data = update.available;

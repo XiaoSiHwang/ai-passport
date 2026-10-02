@@ -17,6 +17,8 @@ def coverage(path: Path) -> set[int]:
     arrays = {}
     for name, body in re.findall(r"static const uint16_t (unicode_list_\d+)\[\] = \{(.*?)\};", source, re.S):
         arrays[name] = [int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]+)", body)]
+    for name, body in re.findall(r"static const uint(?:8|16)_t (glyph_id_ofs_list_\d+)\[\] = \{(.*?)\};", source, re.S):
+        arrays[name] = [int(value, 0) for value in re.findall(r"0x[0-9a-fA-F]+|\d+", body)]
     result = set()
     match = re.search(r"cmaps\[\]\s*=\s*\{(.*?)\n\};", source, re.S)
     assert match
@@ -25,6 +27,9 @@ def coverage(path: Path) -> set[int]:
         length = int(re.search(r"\.range_length\s*=\s*(\d+)", block).group(1))
         if "CMAP_FORMAT0_TINY" in block:
             result.update(range(start, start + length))
+        elif "CMAP_FORMAT0_FULL" in block:
+            name = re.search(r"\.glyph_id_ofs_list\s*=\s*(glyph_id_ofs_list_\d+)", block).group(1)
+            result.update(start + index for index, offset in enumerate(arrays[name]) if index == 0 or offset)
         else:
             name = re.search(r"\.unicode_list\s*=\s*(unicode_list_\d+)", block).group(1)
             result.update(start + offset for offset in arrays[name])
@@ -44,6 +49,12 @@ class FontCoverageTest(unittest.TestCase):
     def test_pixel_digits(self):
         codepoints = coverage(ROOT / "assets/fonts/workout_digits_35.c")
         self.assertEqual(codepoints, set(map(ord, "0123456789.")))
+
+    def test_dynamic_network_font(self):
+        codepoints = coverage(ROOT / "assets/fonts/workout_network_font_16.c")
+        self.assertTrue(set(range(32, 127)) <= codepoints)
+        self.assertTrue(set(map(ord, "家庭网络办公室无线龘")) <= codepoints)
+        self.assertNotIn(0x1F600, codepoints)
 
 
 if __name__ == "__main__":

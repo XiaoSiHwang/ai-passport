@@ -1,6 +1,7 @@
 #pragma once
 
 #include "workout_model.h"
+#include "workout_profiles.h"
 #include "ai_quota.h"
 #include "esp_err.h"
 
@@ -15,6 +16,11 @@ typedef enum {
     WORKOUT_SETUP_EXPIRED,
 } workout_setup_result_t;
 
+typedef enum {
+    WORKOUT_SWITCH_IDLE, WORKOUT_SWITCH_CONNECTING, WORKOUT_SWITCH_SAVED,
+    WORKOUT_SWITCH_FAILED, WORKOUT_SWITCH_STORAGE,
+} workout_switch_result_t;
+
 typedef struct {
     uint32_t revision;
     bool online;
@@ -26,6 +32,11 @@ typedef struct {
     int http_status;
     workout_network_error_t error;
     workout_setup_result_t setup_result;
+    workout_switch_result_t switch_result;
+    bool profile_busy, connecting, exhausted;
+    unsigned wifi_count, server_count, active_wifi, active_server, connecting_wifi, attempted;
+    char wifi_names[WORKOUT_PROFILE_LIMIT][33];
+    char servers[WORKOUT_PROFILE_LIMIT][WORKOUT_URL_SIZE];
     char ap_ssid[24];
     char ap_password[13];
     char token[33];
@@ -40,6 +51,7 @@ typedef struct {
 /* App-lifetime services; no worker/callback holds pointers to LVGL objects. */
 esp_err_t workout_network_start(const workout_config_t *config, const workout_cache_t *cache);
 bool workout_network_request(workout_action_t action);
+bool workout_network_select(workout_action_t action, unsigned selection);
 bool workout_network_submit(const workout_config_t *config, const char *token);
 void workout_network_status(workout_network_status_t *status);
 bool workout_network_take_update(workout_network_update_t *update);

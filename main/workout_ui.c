@@ -10,6 +10,7 @@ LV_FONT_DECLARE(workout_font_12);
 LV_FONT_DECLARE(workout_font_16);
 LV_FONT_DECLARE(workout_font_20);
 LV_FONT_DECLARE(workout_digits_35);
+LV_FONT_DECLARE(workout_network_font_16);
 
 /* Fixed light palette from the approved preview, independent of host appearance. */
 #define UI_BACKGROUND 0xEEF1E8
@@ -20,6 +21,8 @@ LV_FONT_DECLARE(workout_digits_35);
 #define UI_TRACK 0xC3CFBC
 
 static lv_obj_t *s_screen, *s_qr, *s_qr_paper;
+static lv_obj_t *s_profile_label;
+static char s_profile_text[384];
 static workout_ui_state_t s_state;
 static char s_qr_payload[160];
 
@@ -58,6 +61,9 @@ static bool cached(void) {
 }
 
 static const char *network_label(void) {
+    if (s_state.network.setup_active) return "配网";
+    if (s_state.network.profile_busy) return "切换中";
+    if (s_state.network.connecting) return "换网中";
     if (s_state.navigation.view == WORKOUT_VIEW_AI) {
         const ai_quota_state_t *quota = &s_state.quota.providers[s_state.navigation.ai_provider];
         if (!s_state.network.online) return "离线";
@@ -265,14 +271,15 @@ static const char *setup_message(void) {
         case WORKOUT_SETUP_CONNECTING: return "正在连接路由器";
         case WORKOUT_SETUP_SAVED: return "配置已保存，正在同步";
         case WORKOUT_SETUP_BAD_WIFI: return "连接失败，请检查密码";
-        case WORKOUT_SETUP_STORAGE: return "保存失败，请重试";
+        case WORKOUT_SETUP_STORAGE: return s_state.network.error == WORKOUT_NET_STORAGE
+                                          ? "存储损坏，长按下键清除" : "保存失败，请重试";
         case WORKOUT_SETUP_FAILED: return "热点启动失败，请重试";
         case WORKOUT_SETUP_EXPIRED: return "配网已超时，请重试";
         default: return "确定开始配网";
     }
 }
 
-static void network(lv_layer_t *layer) {
+static void setup(lv_layer_t *layer) {
     title(layer, s_state.navigation.setup_step ? "扫码配置" : "连接热点");
     if (!s_state.network.setup_active) {
         small(layer, s_state.network.online ? "已连接 Wi-Fi" : "尚未连接 Wi-Fi", 20, 70, 200);
@@ -297,6 +304,125 @@ static void network(lv_layer_t *layer) {
     hint(layer, "上下/确定 下一步  长按 菜单");
 }
 
+static void profile_hint(lv_layer_t *layer, const char *value) {
+    rectangle(layer, 20, 280, 200, 1, UI_TRACK);
+    small(layer, value, 24, 285, 192);
+    small(layer, "长按确定 返回", 24, 302, 192);
+}
+
+static void display_name(const char *input, char *output, size_t size) {
+    size_t index = 0, used = 0;
+    while (input[index] && used + 16 < size) {
+        size_t start = index;
+        uint32_t code = workout_text_next(input, &index);
+        lv_font_glyph_dsc_t glyph = {0};
+        if (code >= 32 && code != 127 && code != 0xFFFD
+            && lv_font_get_glyph_dsc(&workout_network_font_16, &glyph, code, 0) && !glyph.is_placeholder) {
+            memcpy(output + used, input + start, index - start);
+            used += index - start;
+        } else used += (size_t)snprintf(output + used, size - used, "[U+%04lX]", (unsigned long)code);
+    }
+    output[used] = '\0';
+}
+
+static void short_name(const char *input, char output[384], int width) {
+    display_name(input, output, 384);
+    lv_point_t extent;
+    lv_text_get_size(&extent, output, &workout_network_font_16, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (extent.x <= width) return;
+    size_t length = strlen(output);
+    do {
+        do { length--; } while (length && ((unsigned char)output[length] & 0xC0) == 0x80);
+        strcpy(output + length, "...");
+        lv_text_get_size(&extent, output, &workout_network_font_16, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    } while (length && extent.x > width);
+}
+
+static void profile_row(lv_layer_t *layer, int y, const char *name, const char *meta,
+                        bool selected, bool current, bool dynamic) {
+    uint32_t color = selected ? UI_BACKGROUND : UI_INK;
+    rectangle(layer, 20, y, 200, 45, selected ? UI_ACCENT : UI_PANEL);
+    char text[384];
+    if (dynamic) short_name(name, text, current ? 145 : 180);
+    label(layer, dynamic ? text : name, 30, dynamic ? y : y + 3, current ? 145 : 180,
+          dynamic ? &workout_network_font_16 : &workout_font_16, color);
+    label(layer, meta, 30, y + (dynamic ? 31 : 27), 180, &workout_font_12, selected ? UI_BACKGROUND : UI_MUTED);
+    if (current) label(layer, "当前", 184, y + 6, 30, &workout_font_12, color);
+}
+
+static const char *profile_message(void) {
+    if (s_state.request_failed) return "设备忙，请稍后重试";
+    switch (s_state.network.switch_result) {
+        case WORKOUT_SWITCH_CONNECTING: return "正在切换，请稍候";
+        case WORKOUT_SWITCH_SAVED: return "切换已保存";
+        case WORKOUT_SWITCH_FAILED: return s_state.network.online ? "切换失败，已恢复原网络" : "切换失败，正在恢复连接";
+        case WORKOUT_SWITCH_STORAGE: return "保存失败，请重试";
+        default: return "断线后自动尝试已保存 Wi-Fi";
+    }
+}
+
+static void network(lv_layer_t *layer) {
+    title(layer, "网络与接口");
+    if (!s_state.network.has_config) small(layer, "尚未保存网络配置", 20, 65, 200);
+    char count[48];
+    snprintf(count, sizeof(count), "已保存 %u 个网络", s_state.network.wifi_count);
+    profile_row(layer, 94, "切换 Wi-Fi", count, s_state.navigation.selection == 0, false, false);
+    snprintf(count, sizeof(count), "已保存 %u 个地址", s_state.network.server_count);
+    profile_row(layer, 145, "切换服务器", count, s_state.navigation.selection == 1, false, false);
+    profile_row(layer, 196, "添加配置", "手机扫码配置并保存", s_state.navigation.selection == 2, false, false);
+    const char *message = s_state.network.error == WORKOUT_NET_STORAGE ? "存储不可用，请清除或重试"
+                        : s_state.network.exhausted ? "没有可连接的网络，稍后重试" : profile_message();
+    small(layer, message, 20, 251, 200);
+    profile_hint(layer, "上下 选择  确定 进入");
+}
+
+static void profiles(lv_layer_t *layer) {
+    bool wifi = s_state.navigation.view == WORKOUT_VIEW_WIFI;
+    unsigned count = wifi ? s_state.network.wifi_count : s_state.network.server_count;
+    bool failed = !wifi && s_state.network.error == WORKOUT_NET_HTTP;
+    title(layer, wifi ? "切换 Wi-Fi" : failed ? "服务器未响应" : "切换服务器");
+    if (!count) {
+        small(layer, wifi ? "尚未保存 Wi-Fi" : "尚未保存服务器", 20, 65, 200);
+        label(layer, "确定添加第一组配置", 20, 132, 200, &workout_font_16, UI_INK);
+        small(layer, "成功后会保留配置历史", 20, 180, 200);
+        profile_hint(layer, "确定 添加配置");
+        return;
+    }
+    unsigned selection = s_state.navigation.selection % count;
+    char value[48];
+    snprintf(value, sizeof(value), "已保存%s  %u / %u", wifi ? "网络" : "地址", selection + 1, count);
+    const char *message = s_state.request_failed || s_state.network.switch_result == WORKOUT_SWITCH_STORAGE
+                        ? profile_message() : failed ? "上下选择其他地址，确定切换" : value;
+    small(layer, message, 20, 65, 205);
+    unsigned first = selection / 3 * 3;
+    for (unsigned i = first; i < count && i < first + 3; i++) {
+        bool current = i == (wifi ? s_state.network.active_wifi : s_state.network.active_server);
+        const char *name = wifi ? s_state.network.wifi_names[i] : s_state.network.servers[i];
+        if (!wifi) name = strchr(name, ':') + 3;
+        const char *meta = current ? wifi && s_state.network.online ? "当前已连接"
+                         : failed ? "确定重试当前服务器" : "当前选择"
+                         : i == selection ? "确定后尝试切换" : "已保存";
+        profile_row(layer, 94 + (int)(i - first) * 51, name, meta, i == selection, current, true);
+    }
+    profile_hint(layer, s_state.network.profile_busy ? "切换中，请稍候" : "上下 选择  确定 切换");
+}
+
+static void connection(lv_layer_t *layer) {
+    const workout_network_status_t *status = &s_state.network;
+    title(layer, status->profile_busy ? "正在切换 Wi-Fi" : status->online ? "已连接 Wi-Fi"
+               : status->connecting ? "正在自动换网" : "暂时没有网络");
+    const char *message = status->exhausted ? "已尝试全部保存的 Wi-Fi" : profile_message();
+    small(layer, message, 20, 65, 205);
+    rectangle(layer, 20, 96, 200, 75, UI_PANEL);
+    small(layer, status->online ? "当前网络" : status->connecting ? "正在连接" : "保留已保存配置和缓存", 30, 102, 180);
+    char value[64];
+    snprintf(value, sizeof(value), "第 %u 个 / 共 %u 个网络", status->attempted, status->wifi_count);
+    small(layer, status->connecting ? value : status->online ? "连接成功，正在同步" : "稍后会自动重试", 30, 150, 180);
+    profile_row(layer, 180, status->online ? "立即同步" : "重新连接", "尝试当前配置", s_state.navigation.selection == 0, false, false);
+    profile_row(layer, 231, "添加配置", "手机扫码配置并保存", s_state.navigation.selection == 1, false, false);
+    profile_hint(layer, "上下 选择  确定 执行");
+}
+
 static void draw(lv_event_t *event) {
     lv_layer_t *layer = lv_event_get_layer(event);
     header(layer);
@@ -305,10 +431,13 @@ static void draw(lv_event_t *event) {
         case WORKOUT_VIEW_DETAILS: details(layer); break;
         case WORKOUT_VIEW_MENU: menu(layer); break;
         case WORKOUT_VIEW_NETWORK: network(layer); break;
+        case WORKOUT_VIEW_SETUP: setup(layer); break;
+        case WORKOUT_VIEW_WIFI: case WORKOUT_VIEW_SERVER: profiles(layer); break;
+        case WORKOUT_VIEW_CONNECTION: connection(layer); break;
         case WORKOUT_VIEW_AI: quota_page(layer); break;
         case WORKOUT_VIEW_CLEAR:
             title(layer, "清除网络设置");
-            label(layer, "清除 Wi-Fi 和接口地址？", 20, 134, 205, &workout_font_16, UI_INK);
+            label(layer, "清除全部网络与服务器？", 20, 134, 205, &workout_font_16, UI_INK);
             small(layer, "保留运动和 AI 缓存", 20, 181, 205);
             hint(layer, "确定 清除  上下 取消");
             break;
@@ -345,12 +474,52 @@ bool workout_ui_create(void) {
     lv_obj_set_style_border_width(s_screen, 0, 0);
     lv_obj_set_style_pad_all(s_screen, 0, 0);
     lv_obj_add_event_cb(s_screen, draw, LV_EVENT_DRAW_MAIN, NULL);
+    s_profile_label = lv_label_create(s_screen);
+    if (!s_profile_label) { lv_obj_delete(s_screen); s_screen = NULL; return false; }
+    lv_obj_set_style_text_font(s_profile_label, &workout_network_font_16, 0);
+    lv_obj_set_style_text_color(s_profile_label, lv_color_hex(UI_MUTED), 0);
+    lv_label_set_long_mode(s_profile_label, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+    lv_label_set_text(s_profile_label, "");
+    lv_obj_add_flag(s_profile_label, LV_OBJ_FLAG_HIDDEN);
     lv_screen_load(s_screen);
     return true;
 }
 
+static void profile_label_update(void) {
+    workout_view_t view = s_state.navigation.view;
+    const char *name = NULL;
+    char value[256];
+    int x = 20, y = 244, width = 200;
+    if (view == WORKOUT_VIEW_WIFI && s_state.network.wifi_count)
+        name = s_state.network.wifi_names[s_state.navigation.selection % s_state.network.wifi_count];
+    if (view == WORKOUT_VIEW_SERVER && s_state.network.server_count)
+        name = s_state.network.servers[s_state.navigation.selection % s_state.network.server_count];
+    unsigned index = view == WORKOUT_VIEW_CONNECTION && (s_state.network.connecting || s_state.network.profile_busy)
+                   ? s_state.network.connecting_wifi : s_state.network.active_wifi;
+    if (view == WORKOUT_VIEW_NETWORK && index < s_state.network.wifi_count) {
+        snprintf(value, sizeof(value), "%s %s", s_state.network.online ? "已连接" : "离线",
+                 s_state.network.wifi_names[index]);
+        name = value;
+        y = 58;
+    }
+    if (view == WORKOUT_VIEW_CONNECTION && index < s_state.network.wifi_count) {
+        name = s_state.network.wifi_names[index];
+        x = 30; y = 117; width = 180;
+    }
+    if (!name) { lv_obj_add_flag(s_profile_label, LV_OBJ_FLAG_HIDDEN); return; }
+    char safe[384];
+    display_name(name, safe, sizeof(safe));
+    if (strcmp(safe, s_profile_text) != 0) {
+        strcpy(s_profile_text, safe);
+        lv_label_set_text(s_profile_label, s_profile_text);
+    }
+    lv_obj_set_pos(s_profile_label, x, y);
+    lv_obj_set_size(s_profile_label, width, workout_network_font_16.line_height);
+    lv_obj_remove_flag(s_profile_label, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void qr_update(void) {
-    bool show = s_state.navigation.view == WORKOUT_VIEW_NETWORK && s_state.network.setup_active;
+    bool show = s_state.navigation.view == WORKOUT_VIEW_SETUP && s_state.network.setup_active;
     if (!show) {
         if (s_qr_paper) lv_obj_delete(s_qr_paper);
         s_qr = s_qr_paper = NULL;
@@ -383,5 +552,6 @@ static void qr_update(void) {
 void workout_ui_update(const workout_ui_state_t *state) {
     s_state = *state;
     qr_update();
+    profile_label_update();
     lv_obj_invalidate(s_screen);
 }

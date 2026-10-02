@@ -49,6 +49,7 @@ typedef struct {
 typedef enum {
     WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_DETAILS, WORKOUT_VIEW_MENU,
     WORKOUT_VIEW_NETWORK, WORKOUT_VIEW_FUTURE, WORKOUT_VIEW_CLEAR, WORKOUT_VIEW_AI,
+    WORKOUT_VIEW_SETUP, WORKOUT_VIEW_WIFI, WORKOUT_VIEW_SERVER, WORKOUT_VIEW_CONNECTION,
 } workout_view_t;
 
 typedef enum {
@@ -59,6 +60,7 @@ typedef enum {
 typedef enum {
     WORKOUT_ACTION_NONE, WORKOUT_ACTION_SETUP_START, WORKOUT_ACTION_SETUP_STOP,
     WORKOUT_ACTION_SYNC, WORKOUT_ACTION_CLEAR,
+    WORKOUT_ACTION_SWITCH_WIFI, WORKOUT_ACTION_SWITCH_SERVER, WORKOUT_ACTION_RECONNECT,
 } workout_action_t;
 
 typedef struct {
@@ -68,6 +70,7 @@ typedef struct {
     unsigned setup_step;
     unsigned ai_provider;
     bool ai_weekly;
+    unsigned wifi_count, server_count;
 } workout_navigation_t;
 
 uint32_t workout_checksum(const void *bytes, size_t size);

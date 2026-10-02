@@ -39,11 +39,19 @@ run_static_checks() {
         -o "${test_dir}/test_workout_model"
     "${test_dir}/test_workout_model"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_workout_profiles.c main/workout_profiles.c main/workout_model.c \
+        -o "${test_dir}/test_workout_profiles"
+    "${test_dir}/test_workout_profiles"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/network_stubs -Itests/workout_stubs -Imain \
+        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c \
+        -o "${test_dir}/test_workout_network"
+    "${test_dir}/test_workout_network"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ai_quota.c main/ai_quota.c main/workout_model.c \
         -o "${test_dir}/test_ai_quota"
     "${test_dir}/test_ai_quota"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/workout_stubs -Imain \
-        tests/test_workout_store.c main/workout_store.c main/workout_model.c main/ai_quota.c \
+        tests/test_workout_store.c main/workout_store.c main/workout_model.c main/workout_profiles.c main/ai_quota.c \
         -o "${test_dir}/test_workout_store"
     "${test_dir}/test_workout_store"
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_workout_fonts.py

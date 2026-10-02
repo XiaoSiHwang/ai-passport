@@ -9,6 +9,7 @@ typedef struct {
     ai_quota_update_t quota;
     bool has_data;
     bool from_cache;
+    bool request_failed;
     int battery;
 } workout_ui_state_t;
 

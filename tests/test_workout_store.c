@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-static unsigned char s_values[4][512], s_pending[4][512];
-static size_t s_sizes[4], s_pending_sizes[4];
+static unsigned char s_values[5][2048], s_pending[5][2048];
+static size_t s_sizes[5], s_pending_sizes[5];
 static bool s_fail_commit;
 static unsigned s_open, s_close;
 
@@ -13,6 +13,7 @@ static unsigned slot(const char *key) {
     if (strcmp(key, "network") == 0) return 0;
     if (strcmp(key, "snapshot") == 0) return 1;
     if (strcmp(key, "codex") == 0) return 2;
+    if (strcmp(key, "profiles") == 0) return 4;
     assert(strcmp(key, "glm") == 0);
     return 3;
 }
@@ -35,16 +36,43 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *output, size_
     return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t size) {
-    assert(handle == 1 && size <= 512);
+    assert(handle == 1 && size <= sizeof(s_pending[0]));
     unsigned index = slot(key);
     s_pending_sizes[index] = size;
     memcpy(s_pending[index], value, size);
     return ESP_OK;
 }
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) {
-    assert(handle == 1 && strcmp(key, "network") == 0);
-    s_pending_sizes[0] = 0;
+    assert(handle == 1);
+    s_pending_sizes[slot(key)] = 0;
     return ESP_OK;
+}
+
+static void profile_storage(void) {
+    workout_config_t legacy = {.ssid = "Legacy", .server = "http://example.com/api/workout"};
+    memcpy(s_values[0], &legacy, sizeof(legacy));
+    s_sizes[0] = sizeof(legacy);
+    workout_profiles_t profiles, restored;
+    assert(workout_store_load_profiles(&profiles) == ESP_OK && profiles.wifi_count == 1);
+    assert(strcmp(profiles.wifi[0].ssid, "Legacy") == 0);
+    workout_config_t second = {.ssid = "Office", .server = "http://office.example.com/api/workout"};
+    assert(workout_store_save_config(&second) == ESP_OK);
+    assert(workout_store_load_profiles(&profiles) == ESP_OK && profiles.wifi_count == 2 && profiles.server_count == 2);
+    profiles.active_wifi = 0; workout_profiles_seal(&profiles);
+    s_fail_commit = true;
+    assert(workout_store_save_profiles(&profiles) == ESP_FAIL);
+    assert(workout_store_load_profiles(&restored) == ESP_OK && restored.active_wifi == 1);
+    s_fail_commit = false;
+    assert(workout_store_save_profiles(&profiles) == ESP_OK);
+    workout_config_t loaded;
+    assert(workout_store_load_config(&loaded) == ESP_OK && strcmp(loaded.ssid, "Legacy") == 0);
+    assert(strcmp(loaded.server, second.server) == 0);
+    s_values[4][40] ^= 1;
+    assert(workout_store_load_profiles(&restored) == ESP_ERR_INVALID_CRC);
+    assert(workout_store_save_config(&second) == ESP_ERR_INVALID_CRC);
+    assert(workout_store_load_config(&loaded) == ESP_ERR_INVALID_CRC && loaded.ssid[0] == 0);
+    assert(workout_store_clear_config() == ESP_OK && !s_sizes[0] && !s_sizes[4]);
+    assert(workout_store_load_profiles(&restored) == ESP_ERR_NVS_NOT_FOUND);
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
     assert(handle == 1);
@@ -104,7 +132,7 @@ static void workout_storage(void) {
 }
 
 int main(void) {
-    workout_storage(); quota_storage();
+    workout_storage(); quota_storage(); profile_storage();
     assert(s_open == s_close);
     puts("Workout storage: PASS");
     return 0;

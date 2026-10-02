@@ -25,7 +25,7 @@ DIGITS = [
 
 def symbols() -> str:
     text = (ROOT / "main" / "workout_ui.c").read_text(encoding="utf-8")
-    chinese = {char for char in text if "\u3400" <= char <= "\u9fff" or char in "：？"}
+    chinese = {char for char in text if ord(char) > 126 and char.isprintable()}
     return "".join(chr(value) for value in range(32, 127)) + "".join(sorted(chinese))
 
 
@@ -56,10 +56,25 @@ def pixel_font() -> None:
     (OUTPUT / "workout_digits_35.c").write_text("\n".join(lines), encoding="utf-8")
 
 
+def network_font(font: Path, converter: Path) -> None:
+    """Keep broad CJK support for dynamic SSIDs in Flash, separate from the UI subsets."""
+    destination = OUTPUT / "workout_network_font_16.c"
+    subprocess.run(["node", str(converter), "--font", str(font),
+                    "--range", "0x20-0x7e,0x3000-0x303f,0x3400-0x9fff,0xff00-0xffef",
+                    "--size", "16", "--bpp", "2", "--format", "lvgl", "--no-compress", "--no-kerning",
+                    "--lv-include", "lvgl.h", "--lv-font-name", "workout_network_font_16",
+                    "--output", str(destination)], check=True)
+    source = destination.read_text(encoding="utf-8")
+    source = re.sub(r" \* Opts:.*\n", " * Generated with lv_font_conv 1.5.3; see tools/generate_workout_fonts.py.\n", source)
+    source = "/* Noto Sans CJK SC; SIL OFL 1.1, see NotoSansCJKsc-OFL.txt. */\n" + source
+    destination.write_text(source.rstrip() + "\n", encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--font", required=True, type=Path)
     parser.add_argument("--converter", required=True, type=Path, help="lv_font_conv 1.5.3 JavaScript entry point")
+    parser.add_argument("--network-font", action="store_true", help="Also regenerate the broad 16px CJK SSID font")
     args = parser.parse_args()
     version = subprocess.check_output(["node", str(args.converter), "--version"], text=True).strip()
     if version != "1.5.3":
@@ -81,6 +96,8 @@ def main() -> None:
     header = "#pragma once\n#include <stdint.h>\nstatic const uint32_t workout_font_codepoints[] = {" + array + "};\n"
     (OUTPUT / "workout_font_inventory.h").write_text(header, encoding="utf-8")
     pixel_font()
+    if args.network_font:
+        network_font(args.font, args.converter)
     print("Font SHA-256:", hashlib.sha256(args.font.read_bytes()).hexdigest())
     print("Codepoints:", len(inventory), "Sizes: 12, 16, 20; BPP: 2")
 
