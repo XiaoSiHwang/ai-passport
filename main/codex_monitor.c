@@ -55,12 +55,19 @@ void codex_cursor_accept(codex_cursor_t *cursor, const codex_alert_t *alert) {
     if (alert->cursor > cursor->cursor) cursor->cursor = alert->cursor;
 }
 
+bool codex_monitor_synced(const codex_monitor_state_t *state, bool connected, int64_t now_ms) {
+    return connected && state->available && !state->failed && now_ms >= state->received_ms
+        && now_ms - state->received_ms <= CODEX_FRESH_MS;
+}
+
 bool codex_monitor_fresh(const codex_monitor_state_t *state, const codex_task_t *task,
                          bool connected, int64_t now_ms) {
-    return connected && state->available && !state->failed && state->data.source_online
-        && task->fresh && task->status != CODEX_TASK_UNKNOWN
-        && task->approval != CODEX_APPROVAL_UNKNOWN && now_ms >= state->received_ms
-        && now_ms - state->received_ms <= CODEX_FRESH_MS;
+    return codex_monitor_synced(state, connected, now_ms) && state->data.source_online
+        && task->fresh && task->status != CODEX_TASK_UNKNOWN && task->approval != CODEX_APPROVAL_UNKNOWN;
+}
+
+bool codex_task_finished(const codex_task_t *task) {
+    return task->status == CODEX_TASK_ENDED || task->status == CODEX_TASK_INTERRUPTED;
 }
 
 unsigned codex_monitor_selection(const codex_tasks_data_t *data, const char *task_id) {
@@ -69,15 +76,53 @@ unsigned codex_monitor_selection(const codex_tasks_data_t *data, const char *tas
     return 0;
 }
 
-bool codex_monitor_elapsed(const codex_monitor_state_t *state, const codex_task_t *task,
-                           bool connected, int64_t now_ms, uint32_t *seconds) {
-    bool live = codex_monitor_fresh(state, task, connected, now_ms);
-    int64_t end = task->status == CODEX_TASK_RUNNING ? state->data.generated_seconds
-                                                    : task->updated_seconds;
+static const codex_task_clock_t *task_clock(const codex_clock_t *clock, const codex_task_t *task) {
+    for (unsigned i = 0; i < CODEX_TASK_LIMIT; i++)
+        if (clock->tasks[i].started_seconds == task->started_seconds
+            && strcmp(clock->tasks[i].task_id, task->task_id) == 0) return &clock->tasks[i];
+    return NULL;
+}
+
+static void task_clock_update(codex_task_clock_t *clock, const codex_task_t *task,
+                              const codex_monitor_state_t *state) {
+    bool ticking = (task->status == CODEX_TASK_RUNNING || task->status == CODEX_TASK_APPROVAL)
+        && task->approval != CODEX_APPROVAL_UNKNOWN;
+    int64_t end = ticking ? state->data.generated_seconds : task->updated_seconds;
     int64_t elapsed = end - task->started_seconds;
-    if (task->status == CODEX_TASK_RUNNING && live) elapsed += (now_ms - state->received_ms) / 1000;
-    if (elapsed < 0 || elapsed > 366 * 86400) return false;
-    *seconds = (uint32_t)elapsed;
+    if (elapsed < 0 || elapsed > 366 * 86400) { clock->valid = false; return; }
+    /* Keep the original phase and never rewind an active clock on slow/rounded snapshots. */
+    if (ticking && clock->valid && clock->ticking && state->received_ms >= clock->anchor_ms
+        && elapsed * 1000 <= clock->elapsed_ms + state->received_ms - clock->anchor_ms) return;
+    strcpy(clock->task_id, task->task_id);
+    clock->started_seconds = task->started_seconds;
+    clock->elapsed_ms = elapsed * 1000;
+    clock->anchor_ms = state->received_ms;
+    clock->valid = true;
+    clock->ticking = ticking;
+}
+
+void codex_monitor_clock_update(codex_clock_t *clock, const codex_monitor_state_t *state) {
+    if (!state->available) { memset(clock, 0, sizeof(*clock)); return; }
+    bool same_stream = clock->available && strcmp(clock->stream_id, state->data.stream_id) == 0;
+    if (state->failed || (same_stream && clock->received_ms == state->received_ms)) return;
+    codex_clock_t next = {.available = true, .received_ms = state->received_ms};
+    strcpy(next.stream_id, state->data.stream_id);
+    for (unsigned i = 0; i < state->data.count; i++) {
+        const codex_task_t *task = &state->data.tasks[i];
+        const codex_task_clock_t *previous = same_stream ? task_clock(clock, task) : NULL;
+        if (previous) next.tasks[i] = *previous;
+        task_clock_update(&next.tasks[i], task, state);
+    }
+    *clock = next;
+}
+
+bool codex_monitor_elapsed(const codex_clock_t *clock, const codex_task_t *task,
+                           int64_t now_ms, uint32_t *seconds) {
+    const codex_task_clock_t *timer = clock->available ? task_clock(clock, task) : NULL;
+    if (!timer || !timer->valid || now_ms < timer->anchor_ms) return false;
+    int64_t elapsed = timer->elapsed_ms + (timer->ticking ? now_ms - timer->anchor_ms : 0);
+    if (elapsed > (int64_t)366 * 86400 * 1000) return false;
+    *seconds = (uint32_t)(elapsed / 1000);
     return true;
 }
 

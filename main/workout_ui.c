@@ -29,6 +29,7 @@ static lv_obj_t *s_screen, *s_qr, *s_qr_paper;
 static lv_obj_t *s_profile_label;
 static lv_obj_t *s_codex_title_label;
 static lv_font_t s_codex_font_12, s_codex_font_16;
+static codex_clock_t s_codex_clock;
 static char s_codex_title_text[384];
 static char s_profile_text[384];
 static workout_ui_state_t s_state;
@@ -78,9 +79,10 @@ static const char *network_label(void) {
         if (!s_state.codex.available) return "等待同步";
         if (!s_state.codex.data.source_online) return "电脑离线";
         if (s_state.codex.alerts_failed) return "提醒同步失败";
+        if (!codex_monitor_synced(&s_state.codex, true, s_state.now_ms)) return "数据未更新";
         unsigned index = s_state.navigation.codex_selection;
         if (index < s_state.codex.data.count && !codex_monitor_fresh(&s_state.codex,
-            &s_state.codex.data.tasks[index], true, s_state.now_ms)) return "状态未确认";
+            &s_state.codex.data.tasks[index], true, s_state.now_ms)) return "采集非实时";
         return "Wi-Fi";
     }
     if (s_state.navigation.view == WORKOUT_VIEW_AI) {
@@ -339,7 +341,7 @@ static const char *codex_status(const codex_task_t *task) {
 }
 
 static uint32_t codex_status_color(const codex_task_t *task, bool fresh) {
-    if (!fresh) return UI_MUTED;
+    if (!fresh && !codex_task_finished(task)) return UI_MUTED;
     if (task->status == CODEX_TASK_APPROVAL) return UI_AMBER;
     return task->status == CODEX_TASK_INTERRUPTED ? UI_DANGER : UI_INK;
 }
@@ -347,7 +349,7 @@ static uint32_t codex_status_color(const codex_task_t *task, bool fresh) {
 static void codex_status_mark(lv_layer_t *layer, const codex_task_t *task, bool fresh, int x, int y) {
     uint32_t color = codex_status_color(task, fresh);
     rectangle(layer, x, y + 4, 6, 6, color);
-    if (!fresh) rectangle(layer, x + 1, y + 5, 4, 4, UI_PANEL);
+    if (!fresh && !codex_task_finished(task)) rectangle(layer, x + 1, y + 5, 4, 4, UI_PANEL);
     label(layer, codex_status(task), x + 10, y, 65, &workout_font_12, color);
 }
 
@@ -360,7 +362,7 @@ static const char *codex_step(const codex_task_t *task) {
 
 static void codex_duration(const codex_task_t *task, char value[32]) {
     uint32_t seconds;
-    if (!codex_monitor_elapsed(&s_state.codex, task, s_state.network.online, s_state.now_ms, &seconds)) {
+    if (!codex_monitor_elapsed(&s_codex_clock, task, s_state.now_ms, &seconds)) {
         strcpy(value, "--");
         return;
     }
@@ -369,12 +371,13 @@ static void codex_duration(const codex_task_t *task, char value[32]) {
                   (unsigned long)(seconds / 60 % 60), (unsigned long)(seconds % 60));
 }
 
-static void codex_stamp(lv_layer_t *layer, bool fresh) {
+static void codex_stamp(lv_layer_t *layer) {
     char value[64];
     int64_t seconds = (s_state.now_ms - s_state.codex.received_ms) / 1000;
     if (seconds < 0) seconds = 0;
-    if (fresh && seconds < 10) strcpy(value, "刚刚同步");
-    else snprintf(value, sizeof(value), "%s %lu%s前", fresh ? "同步" : "上次",
+    bool synced = codex_monitor_synced(&s_state.codex, s_state.network.online, s_state.now_ms);
+    if (synced && seconds < 10) strcpy(value, "刚刚同步");
+    else snprintf(value, sizeof(value), "%s %lu%s前", synced ? "同步" : "上次",
         (unsigned long)(seconds < 60 ? seconds : seconds < 3600 ? seconds / 60 : seconds / 3600),
         seconds < 60 ? "秒" : seconds < 3600 ? "分" : "小时");
     small(layer, value, 20, 272, 137);
@@ -392,7 +395,7 @@ static void codex_empty(lv_layer_t *layer) {
     const char *body = !s_state.network.has_config ? "长按确定，进入网络配置"
         : !s_state.network.online ? "连接网络后自动同步"
         : state->failed ? "确定重试，检查后端接口"
-        : state->available && !state->data.source_online ? "请在电脑启动任务采集器" : "在电脑上开始一个 Codex 任务";
+        : state->available && !state->data.source_online ? "请启动电脑端任务采集服务" : "在电脑上开始一个 Codex 任务";
     small(layer, body, 20, 183, 200);
     small(layer, "进展会显示在这里", 20, 205, 200);
     if (state->http_status && state->http_status != 200) {
@@ -416,20 +419,22 @@ static void codex_page(lv_layer_t *layer) {
     codex_block(layer, value, 20, 66, 200, &s_codex_font_12, 1, UI_MUTED);
     bool approval = fresh && task->approval == CODEX_APPROVAL_REQUESTED;
     rectangle(layer, 20, 90, 200, 116, approval ? UI_AMBER_BG : UI_PANEL);
-    if (!fresh) for (int x = 20; x < 220; x += 8) rectangle(layer, x, 90, 4, 1, UI_MUTED);
+    if (!fresh && !codex_task_finished(task))
+        for (int x = 20; x < 220; x += 8) rectangle(layer, x, 90, 4, 1, UI_MUTED);
     codex_block(layer, task->project, 30, 100, 107, &s_codex_font_12, 1, UI_MUTED);
     codex_status_mark(layer, task, fresh, 144, 100);
     codex_block(layer, task->title[0] ? task->title : "Codex 任务", 30, 125, 180, &s_codex_font_16, 2, UI_INK);
     codex_block(layer, codex_step(task), 30, 182, 180, &s_codex_font_12, 1, UI_MUTED);
     const char *message = task->approval == CODEX_APPROVAL_UNKNOWN ? "审批结果未确认，请在电脑查看"
-        : !fresh ? "最后状态 · 现在无法确认" : task->status == CODEX_TASK_RUNNING ? "已运行"
-        : task->status == CODEX_TASK_APPROVAL ? "请求时用时" : "本回合用时";
-    label(layer, message, 20, 214, 200, &workout_font_12, !fresh ? UI_AMBER : UI_MUTED);
+        : codex_task_finished(task) ? "本回合用时" : task->status == CODEX_TASK_UNKNOWN ? "最后记录用时"
+        : !fresh ? "本地估算 · 状态待同步" : task->status == CODEX_TASK_APPROVAL ? "已运行 · 含等待审批" : "已运行";
+    label(layer, message, 20, 214, 200, &workout_font_12,
+          !fresh && !codex_task_finished(task) ? UI_AMBER : UI_MUTED);
     codex_duration(task, value);
     label(layer, value, 20, 233, 178, strlen(value) <= 7 && value[0] != '-' ? &workout_digits_35 : &workout_font_20, UI_INK);
     if (fresh && strlen(value) <= 5) for (unsigned i = 0; i < 12; i++) rectangle(layer, 190 + (int)(i % 4) * 7,
         244 + (int)(i / 4) * 7, 4, 4, i % 3 ? UI_ACCENT : UI_TRACK);
-    codex_stamp(layer, fresh);
+    codex_stamp(layer);
     hint(layer, s_state.codex.failed || s_state.codex.alerts_failed ? "上下 切换  确定 重试" : "上下 切换  确定 详情");
 }
 
@@ -441,16 +446,20 @@ static void codex_details(lv_layer_t *layer) {
     if (lv_obj_has_flag(s_codex_title_label, LV_OBJ_FLAG_HIDDEN))
         codex_block(layer, task->title[0] ? task->title : "Codex 任务", 20, 90, 200, &s_codex_font_16, 4, UI_INK);
     bool fresh = codex_monitor_fresh(&s_state.codex, task, s_state.network.online, s_state.now_ms);
-    small(layer, "当前状态", 20, 181, 100);
+    small(layer, codex_task_finished(task) ? "回合状态" : "当前状态", 20, 181, 100);
     codex_status_mark(layer, task, fresh, 145, 181);
     rectangle(layer, 20, 202, 200, 1, UI_TRACK);
-    small(layer, fresh ? "回合用时" : "记录用时", 20, 211, 100);
+    small(layer, fresh || codex_task_finished(task) ? "回合用时"
+        : task->status == CODEX_TASK_UNKNOWN || task->approval == CODEX_APPROVAL_UNKNOWN
+        ? "记录用时" : "估算用时", 20, 211, 100);
     char value[32];
     codex_duration(task, value);
     label(layer, value, 127, 211, 93, &workout_font_12, UI_INK);
     rectangle(layer, 20, 232, 200, 1, UI_TRACK);
     codex_block(layer, codex_step(task), 20, 242, 200, &s_codex_font_12, 2, UI_MUTED);
-    if (!fresh) small(layer, "旧状态，请在电脑确认", 20, 277, 200);
+    if (!fresh) small(layer, codex_task_finished(task) ? "回合已停止 · 采集非实时"
+        : task->status == CODEX_TASK_UNKNOWN || task->approval == CODEX_APPROVAL_UNKNOWN
+        ? "状态未知，请在电脑确认" : "采集非实时 · 用时为估算", 20, 277, 200);
     else if (s_state.codex.data.omitted_count) {
         snprintf(value, sizeof(value), "另有 %lu 个任务", (unsigned long)s_state.codex.data.omitted_count);
         small(layer, value, 20, 277, 200);
@@ -683,6 +692,7 @@ static bool font_coverage(void) {
 }
 
 bool workout_ui_create(void) {
+    memset(&s_codex_clock, 0, sizeof(s_codex_clock));
     s_codex_font_12 = workout_font_12;
     s_codex_font_12.fallback = &workout_monitor_font_12;
     s_codex_font_16 = workout_font_16;
@@ -801,6 +811,7 @@ static void codex_title_update(void) {
 
 void workout_ui_update(const workout_ui_state_t *state) {
     s_state = *state;
+    codex_monitor_clock_update(&s_codex_clock, &s_state.codex);
     qr_update();
     profile_label_update();
     codex_title_update();

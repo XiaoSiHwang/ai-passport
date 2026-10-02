@@ -191,7 +191,7 @@ static void app_loop(void) {
         if (s_state.now_ms >= next_codex_frame) {
             if (s_brightness && (s_state.navigation.view == WORKOUT_VIEW_CODEX
                 || s_state.navigation.view == WORKOUT_VIEW_CODEX_DETAILS)) refresh();
-            next_codex_frame = s_state.now_ms + 1000;
+            next_codex_frame = (s_state.now_ms / 1000 + 1) * 1000;
         }
         if (s_ui_dirty) refresh();
     }

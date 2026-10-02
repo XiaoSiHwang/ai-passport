@@ -137,6 +137,44 @@ static void codex_text_screens(workout_ui_state_t *state) {
     state->navigation.view = WORKOUT_VIEW_MENU; workout_ui_update(state); lv_refr_now(NULL);
 }
 
+static uint32_t duration_pixels(void) {
+    uint32_t hash = 2166136261u;
+    for (unsigned y = 233; y < 268; y++)
+        for (unsigned x = 20; x < 185; x++) hash = (hash ^ s_frame[y * 240 + x]) * 16777619u;
+    return hash;
+}
+
+static void codex_clock_screens(workout_ui_state_t *state) {
+    memset(&state->codex, 0, sizeof(state->codex));
+    state->network.online = state->codex.available = state->codex.data.source_online = true;
+    state->navigation.view = WORKOUT_VIEW_CODEX; state->navigation.codex_selection = 0;
+    state->codex.data.count = state->navigation.codex_count = 1;
+    state->codex.data.generated_seconds = 200; state->codex.received_ms = state->now_ms = 1250;
+    strcpy(state->codex.data.stream_id, "stream_clock");
+    codex_task_t *task = &state->codex.data.tasks[0];
+    *task = (codex_task_t){.task_id = "task_clock", .title = "检查本地连续计时", .project = "ai-passport",
+        .status = CODEX_TASK_RUNNING, .started_seconds = 100, .updated_seconds = 140};
+    workout_ui_update(state); screenshot("codex-clock-nonlive.ppm");
+    uint32_t initial = duration_pixels();
+    state->now_ms = 2250;
+    workout_ui_update(state); screenshot("codex-clock-next-second.ppm");
+    assert(initial != duration_pixels()); /* Actual screen changes without receiving another snapshot. */
+    state->codex.received_ms = state->now_ms = 3250;
+    task->status = CODEX_TASK_APPROVAL; task->approval = CODEX_APPROVAL_REQUESTED;
+    workout_ui_update(state); screenshot("codex-clock-approval.ppm");
+    initial = duration_pixels(); state->now_ms += 1000;
+    workout_ui_update(state); lv_refr_now(NULL); assert(initial != duration_pixels());
+    state->codex.received_ms = state->now_ms;
+    task->status = CODEX_TASK_ENDED; task->approval = CODEX_APPROVAL_NONE; task->updated_seconds = 180;
+    workout_ui_update(state); screenshot("codex-ended-nonlive.ppm");
+    initial = duration_pixels(); state->now_ms += 60000; state->network.online = false;
+    workout_ui_update(state); screenshot("codex-ended-offline.ppm");
+    assert(initial == duration_pixels()); /* Confirmed stop stays fixed even with stale collector data. */
+    state->network.online = true; state->codex.received_ms = state->now_ms;
+    state->navigation.view = WORKOUT_VIEW_CODEX_DETAILS;
+    workout_ui_update(state); screenshot("codex-ended-nonlive-details.ppm");
+}
+
 static void codex_screens(workout_ui_state_t *state) {
     state->navigation.view = WORKOUT_VIEW_CODEX;
     state->navigation.codex_count = state->codex.data.count = 3;
@@ -159,6 +197,7 @@ static void codex_screens(workout_ui_state_t *state) {
     state->navigation.view = WORKOUT_VIEW_CODEX_DETAILS;
     workout_ui_update(state); screenshot("codex-task-details.ppm");
     codex_task_t *task = &state->codex.data.tasks[0];
+    state->codex.received_ms = ++state->now_ms;
     task->status = CODEX_TASK_APPROVAL; task->approval = CODEX_APPROVAL_REQUESTED;
     strcpy(task->approval_summary, "需要在电脑端授权：Bash");
     state->codex.data.pending_count = 1; state->navigation.view = WORKOUT_VIEW_CODEX;
@@ -170,11 +209,14 @@ static void codex_screens(workout_ui_state_t *state) {
     assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(), 0), LV_OBJ_FLAG_HIDDEN));
     assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(), 1), LV_OBJ_FLAG_HIDDEN));
     state->codex_popup = false; task->approval = CODEX_APPROVAL_UNKNOWN; task->fresh = false;
+    state->codex.received_ms = ++state->now_ms;
     workout_ui_update(state); screenshot("codex-approval-unknown.ppm");
     task->approval = CODEX_APPROVAL_NONE; task->status = CODEX_TASK_ENDED; task->fresh = true;
+    state->codex.received_ms = ++state->now_ms;
     state->codex.data.pending_count = 0;
     workout_ui_update(state); screenshot("codex-task-ended.ppm");
     task->status = CODEX_TASK_INTERRUPTED;
+    state->codex.received_ms = ++state->now_ms;
     workout_ui_update(state); screenshot("codex-task-interrupted.ppm");
     state->network.online = false; state->now_ms = 61000;
     workout_ui_update(state); screenshot("codex-tasks-offline.ppm");
@@ -182,6 +224,7 @@ static void codex_screens(workout_ui_state_t *state) {
     workout_ui_update(state); screenshot("codex-tasks-sync-failed.ppm");
     state->codex.failed = false; state->now_ms = 1000; state->codex.data.count = 0;
     workout_ui_update(state); screenshot("codex-tasks-empty.ppm");
+    codex_clock_screens(state);
     codex_text_screens(state);
 }
 

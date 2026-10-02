@@ -201,10 +201,23 @@ The schema-version-1 decoder accepts the backend's bounded UTF-8 envelopes,
 oversized, unsupported-schema or older-revision responses retain the previous
 RAM snapshot. Wi-Fi loss, backend failure, host offline, backend `fresh=false`,
 unknown approval or a snapshot older than 15 seconds is explicitly non-live.
-Silence never marks a task ended. Elapsed time is estimated from the API timestamps
-and monotonic time since reception; clock differences can affect it, and invalid
-or reversed timestamps display `--`. Ended/interrupted means the turn stopped,
-not that the user's requirement succeeded.
+The header describes collection/synchronization health separately from the task
+badge: a confirmed ended/interrupted turn retains its final state and duration
+even when the collector is non-live. Silence never marks a task ended.
+
+Each of the three displayed tasks has a RAM clock keyed by stream, task ID and
+start time (400 bytes total). Its first snapshot supplies the elapsed baseline;
+running and approval-waiting turns then advance every second on the device's
+monotonic clock. Refreshes preserve the subsecond phase and only correct active
+timers forwards. Polling delays, failed requests, Wi-Fi loss and incomplete
+collector evidence do not freeze or rewind the estimate; the UI identifies
+non-live timing as a local estimate. Unknown state/approval freezes at the last
+recorded update. An ended/interrupted snapshot replaces the estimate with its
+authoritative stop time and stops the clock. Switching tasks preserves clocks;
+new turns, streams, removed tasks and source resets discard previous baselines.
+Clock differences can affect the estimate, and invalid or reversed timestamps
+display `--`. Ended/interrupted means the turn stopped, not that the user's
+requirement succeeded.
 
 First connection and device reboot request alerts without `after`, establishing
 a silent cursor baseline. Existing approval requests remain visible in task state.
@@ -261,10 +274,13 @@ Chinese glyphs and heap/stack behavior during repeated requests and provisioning
 
 Codex checks cover actual backend response fixtures, malformed/duplicate fields,
 UTF-8/schema/size/count bounds, cursor baselines/replay/expiry, queue backpressure,
-source changes, independent scheduling, stale data, selection by ID and the actual
+source changes, independent scheduling, stale data, selection by ID, continuous
+local timing through delayed/failed polling and approval waits, final stop times,
+clock identity/reset behavior and the actual
 app's local-only dismissal/wake/button-callback boundary. LVGL rendering covers
 tasks/details, approval/unknown/ended/interrupted, offline/failed/empty states,
-dynamic Chinese, unsupported glyphs and full-title scrolling within the 24 KB
+dynamic Chinese, unsupported glyphs, full-title scrolling, timer pixel changes
+without a new snapshot and fixed ended-turn pixels within the 24 KB
 pool. Device acceptance still needs real collector events, readable Chinese and
 screen boundaries, cross-page wake, duplicate suppression, reconnect/410 recovery,
 source switching, endpoint failures, measured latency and heap/stack high-water

@@ -71,6 +71,19 @@ typedef struct {
     int64_t received_ms, checked_ms;
 } codex_monitor_state_t;
 
+typedef struct {
+    char task_id[CODEX_ID_SIZE];
+    int64_t started_seconds, elapsed_ms, anchor_ms;
+    bool valid, ticking;
+} codex_task_clock_t;
+
+typedef struct {
+    char stream_id[CODEX_ID_SIZE];
+    int64_t received_ms;
+    bool available;
+    codex_task_clock_t tasks[CODEX_TASK_LIMIT];
+} codex_clock_t;
+
 bool codex_monitor_url(const char *workout_url, bool alerts, bool baseline,
                        uint32_t cursor, char output[CODEX_URL_SIZE]);
 bool codex_cursor_stream(codex_cursor_t *cursor, const char *stream_id);
@@ -78,11 +91,15 @@ bool codex_cursor_baseline(codex_cursor_t *cursor, const codex_alert_page_t *pag
 bool codex_alert_seen(const codex_cursor_t *cursor, const codex_alert_t *alert);
 bool codex_alert_notify(const codex_alert_t *alert);
 void codex_cursor_accept(codex_cursor_t *cursor, const codex_alert_t *alert);
+bool codex_monitor_synced(const codex_monitor_state_t *state, bool connected, int64_t now_ms);
 bool codex_monitor_fresh(const codex_monitor_state_t *state, const codex_task_t *task,
                          bool connected, int64_t now_ms);
+bool codex_task_finished(const codex_task_t *task);
 unsigned codex_monitor_selection(const codex_tasks_data_t *data, const char *task_id);
-bool codex_monitor_elapsed(const codex_monitor_state_t *state, const codex_task_t *task,
-                           bool connected, int64_t now_ms, uint32_t *seconds);
+/* Keep clocks in RAM across snapshot refreshes, independently of collector freshness. */
+void codex_monitor_clock_update(codex_clock_t *clock, const codex_monitor_state_t *state);
+bool codex_monitor_elapsed(const codex_clock_t *clock, const codex_task_t *task,
+                           int64_t now_ms, uint32_t *seconds);
 bool codex_alert_finished(const codex_monitor_state_t *state, const codex_alert_t *alert);
 bool codex_alert_current(const codex_monitor_state_t *state, const codex_alert_t *alert,
                          bool connected, int64_t now_ms);
