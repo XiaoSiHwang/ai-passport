@@ -32,6 +32,29 @@ idf.py fullclean              # 只清空过期生成状态（勿用于清理用
 target 或已跟踪 defaults 时，先保留有意的本地设置，再运行
 `idf.py set-target esp32c3`。
 
+### macOS 一键开发刷写
+
+用 USB 数据线连接设备后，在 Finder 中双击
+[`tools/flash.command`](../../../tools/flash.command)，或在终端运行
+`./tools/flash.command`。脚本自动激活 ESP-IDF 5.5.3，识别唯一的 Espressif
+USB Serial/JTAG 设备，构建当前代码，校验并归档固件，然后分段刷写。
+它不会刷入合并镜像或擦除整个芯片。写入前要求设备分区表与当前构建一致，
+否则停止刷写，以保护已存数据。
+
+```bash
+./tools/flash.command
+./tools/flash.command /dev/cu.usbmodem1101 # 显式指定串口
+./tools/flash.command --build-only       # 只构建和校验，不访问设备
+```
+
+默认工具链目录是 `$HOME/.cache/ai-passport/esp-idf-v5.5.3`，工具目录是
+`$HOME/.cache/ai-passport/idf-tools`。使用其他安装位置时，设置
+`AI_PASSPORT_IDF_ROOT`（或 `IDF_PATH`）和对应的 `IDF_TOOLS_PATH`。
+脚本在 `build/flash/` 保留增量配置和构建产物，首次使用 `sdkconfig.defaults`，
+不会读取或覆盖根目录的 `sdkconfig`。未检测到设备或检测到多个候选设备时，
+停止自动刷写。这个开发快捷入口校验固件，但不运行主机测试；交付前仍应使用
+`./tools/validate.sh` 完整门禁。终端运行成功或失败后等待回车，便于查看结果。
+
 ### 加速重复编译
 
 ccache 能在源码需要重新编译时复用已有编译结果。ESP-IDF 5.5.3 默认不启用

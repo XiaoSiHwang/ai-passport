@@ -36,6 +36,32 @@ changed defaults. Preserve intentional local settings, then run
 `idf.py set-target esp32c3` when the target or tracked defaults must be
 regenerated.
 
+### One-click development flashing on macOS
+
+Connect the device with a USB data cable and double-click
+[`tools/flash.command`](../../../tools/flash.command) in Finder, or run
+`./tools/flash.command` from a terminal. It activates ESP-IDF 5.5.3, selects a
+single Espressif USB Serial/JTAG device, builds the current code, verifies and
+archives the firmware, and flashes its component images. It does not flash the
+merged image or erase the entire chip. The existing device partition table must
+match the build before writing; otherwise the script stops to protect stored data.
+
+```bash
+./tools/flash.command
+./tools/flash.command /dev/cu.usbmodem1101 # select a port explicitly
+./tools/flash.command --build-only       # build/verify without device access
+```
+
+The default toolchain location is `$HOME/.cache/ai-passport/esp-idf-v5.5.3`,
+with tools under `$HOME/.cache/ai-passport/idf-tools`. For another installation,
+set `AI_PASSPORT_IDF_ROOT` (or `IDF_PATH`) and the appropriate `IDF_TOOLS_PATH`.
+The script keeps its incremental configuration and output in `build/flash/`,
+initially using `sdkconfig.defaults`; it does not read or overwrite the root
+`sdkconfig`. Missing or multiple matching devices stop automatic flashing.
+This development shortcut verifies the firmware but does not run host tests;
+use `./tools/validate.sh` for the complete delivery gate. A Terminal window waits
+for Enter after success or failure so the result remains readable.
+
 ### Speeding up repeated builds
 
 ccache can reuse previous compiler results when sources need to be compiled
