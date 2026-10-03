@@ -39,6 +39,9 @@ run_static_checks() {
         -o "${test_dir}/test_workout_model"
     "${test_dir}/test_workout_model"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_workout_power.c main/workout_power.c -o "${test_dir}/test_workout_power"
+    "${test_dir}/test_workout_power"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_passport_calendar.c main/passport_calendar.c main/workout_model.c \
         -o "${test_dir}/test_passport_calendar"
     "${test_dir}/test_passport_calendar"
@@ -49,7 +52,7 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -Itests/codex_stubs -Itests/network_stubs -Itests/workout_stubs -Imain \
         tests/test_codex_app.c main/codex_monitor.c main/workout_model.c "${gc_flag}" \
-        main/passport_calendar.c \
+        main/passport_calendar.c main/workout_power.c \
         -o "${test_dir}/test_codex_app"
     "${test_dir}/test_codex_app"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -57,7 +60,7 @@ run_static_checks() {
         -o "${test_dir}/test_workout_profiles"
     "${test_dir}/test_workout_profiles"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/network_stubs -Itests/workout_stubs -Imain \
-        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c main/ai_tokens.c main/codex_monitor.c \
+        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c main/ai_tokens.c main/codex_monitor.c main/workout_power.c \
         -o "${test_dir}/test_workout_network"
     "${test_dir}/test_workout_network"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -90,6 +93,10 @@ run_static_checks() {
         tests/test_bsp_lvgl_init.c components/bsp/src/bsp_display_rounding.c \
         -o "${test_dir}/test_bsp_lvgl_init"
     "${test_dir}/test_bsp_lvgl_init"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itests/bsp_stubs -Icomponents/bsp/include \
+        tests/test_bsp_display_sleep.c -o "${test_dir}/test_bsp_display_sleep"
+    "${test_dir}/test_bsp_display_sleep"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
         -Itests/audio_stubs -Icomponents/bsp/include -Icomponents/bsp/src \
         tests/test_bsp_audio_recovery.c components/bsp/src/bsp_es8311_sleep_check.c \

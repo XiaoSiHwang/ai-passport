@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+static inline const char *esp_err_to_name(esp_err_t err) { (void)err; return "injected"; }
 
 #define ESP_ERR_INVALID_STATE 6
 #define BIT0 1U
@@ -19,6 +20,10 @@ typedef int portMUX_TYPE;
 typedef unsigned EventBits_t;
 typedef EventBits_t *EventGroupHandle_t;
 typedef struct test_queue *QueueHandle_t;
+typedef void *TaskHandle_t;
+TaskHandle_t xTaskGetCurrentTaskHandle(void);
+void xTaskNotifyGive(TaskHandle_t task);
+unsigned ulTaskNotifyTake(int clear, unsigned timeout);
 EventGroupHandle_t xEventGroupCreate(void);
 void vEventGroupDelete(EventGroupHandle_t group);
 EventBits_t xEventGroupGetBits(EventGroupHandle_t group);
@@ -104,6 +109,9 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
 esp_err_t esp_http_client_perform(esp_http_client_handle_t client);
 int esp_http_client_get_status_code(esp_http_client_handle_t client);
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client);
+esp_err_t esp_http_client_set_url(esp_http_client_handle_t client, const char *url);
+esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t client, int timeout);
+esp_err_t esp_http_client_set_user_data(esp_http_client_handle_t client, void *user);
 esp_err_t esp_crt_bundle_attach(void *config);
 typedef struct { const char *server; } esp_sntp_config_t;
 #define ESP_NETIF_SNTP_DEFAULT_CONFIG(value) ((esp_sntp_config_t){.server = (value)})

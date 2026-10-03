@@ -129,6 +129,20 @@ display running or reinitialize a port whose previous task may still be alive.
 
 Before terminal deep sleep, stop new page work and hold the LVGL lock long enough to finish any current flush. `bsp_display_prepare_deep_sleep()` then sends display-off and Sleep In, stops the backlight PWM at low level, drives CS high and SCLK/MOSI/DC/backlight low, enables per-pin hold, and enables the ESP32-C3 global deep-sleep hold. `bsp_display_init()` disables the global and per-pin holds before SPI or LEDC takes ownership after wake. This terminal API is not a reversible display blanking operation and must be followed immediately by deep sleep or restart.
 
+For reversible screen standby, use `bsp_lvgl_sleep()` / `bsp_lvgl_wake()` from a
+serialized application task. Sleep pauses the existing active LVGL timers and the
+port tick, then sends LCD Display Off / Sleep In and stops backlight output. The
+SPI command drains pending color transfers while the LVGL lock prevents new ones.
+The timer handler remains enabled with each timer paused: disabling the handler
+alone causes a 1 ms retry in the pinned LVGL/port combination. Wake restores LCD,
+elapsed tick time, and only the previously active timers. Do not mutate objects
+or create/delete timers until wake completes; retained timer pointers must stay
+valid. Failure may leave rendering paused, so retry wake rather than deleting UI.
+After updating the resumed UI, `bsp_lvgl_refresh()` draws and drains SPI before
+the application raises backlight brightness. These APIs retain bus/pin ownership
+and do not enter MCU sleep or change Wi-Fi. Non-LVGL clients can use the lower-level
+`bsp_display_sleep()` / `bsp_display_wake()` while preventing concurrent drawing.
+
 LVGL is not thread-safe. Timer callbacks in LVGL context may access objects directly. Button callbacks must not access LVGL; they enqueue input for the lifecycle task. The lifecycle task and other workers must use `bsp_lvgl_lock()`/`bsp_lvgl_unlock()` for short UI operations. Stop producers before deleting a page and clear static object pointers afterward.
 
 ## 6. ADC button ladder

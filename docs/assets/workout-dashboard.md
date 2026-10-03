@@ -37,9 +37,46 @@ Clearing network configuration retains the workout and AI snapshots.
 
 The three buttons are physical controls, not on-screen buttons. Idle backlight
 brightness drops to 20% after 30 seconds and turns off after 60 seconds. The
-first key wakes the screen without executing an action. Wi-Fi modem power saving
-and automatic light sleep are enabled; actual board power and USB behavior need
-device measurement. Audio and Bluetooth services are not started.
+first key wakes the screen without executing an action. Screen-off enters the
+reversible standby described below. Audio and Bluetooth services are not started.
+
+## Standby and power
+
+After 60 seconds without input or a valid approval reminder, the application stops
+LVGL drawing, pauses its existing timers and 5 ms tick, stops backlight output,
+and sends Display Off / Sleep In to the LCD. It retains the current page and
+updates application caches without touching LVGL while the screen sleeps. A key
+or a valid Codex approval reminder resumes the LCD and timers, updates the latest
+UI, and waits for the first frame's SPI transfers before lighting the backlight.
+The first key only wakes; failed sleep/wake operations retain state for retry.
+
+This is online standby: Wi-Fi modem power saving and automatic light sleep remain
+enabled, with the existing Codex task/reminder synchronization and 15-second
+freshness policy. It does not stop Wi-Fi, enter deep sleep, or switch off the
+board's power rails. Input and network updates signal tasks; idle waits use the
+next display, clock, battery, retry, provisioning, or synchronization deadline
+instead of fixed 100/250 ms polling. Screen-off battery reads use a five-minute
+interval after the next scheduled read; wake requests a fresh reading and restores
+the normal 30-second interval. CPU frequency scales between 40 and
+160 MHz; initialization reports power-management errors rather than ignoring them.
+
+The ADC button ladder remains in use. The tracked configuration scans every
+20 ms with one debounce tick, retaining the 180 ms short-press and 500 ms
+long-press settings. No unverified GPIO wake wiring is assumed. One HTTP client
+is retained by the network worker to reuse server-supported connections across
+endpoints, with request-local response buffers and endpoint-specific timeouts.
+Transport errors, server errors, oversized responses, disconnects, configuration
+changes, and entry to provisioning release it; HTTPS certificate validation and
+disabled redirects remain enabled.
+
+Host tests cover deadline boundaries, cached screen-off updates, wake-only keys,
+display/timer failure recovery, connection reuse and worker notifications. Device
+acceptance still requires repeated sleep/wake cycles, short/long press behavior,
+approval reminders during standby, provisioning and reconnect, heap stability
+with HTTP/HTTPS, and battery-side average-current measurements before and after
+the change. Measure away from a computer USB connection too: USB Serial/JTAG
+connection protection can prevent automatic light sleep. Board amplifier/codec
+residual current and actual battery life are not established by a build.
 
 ## Clock, calendar and almanac
 

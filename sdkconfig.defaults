@@ -38,6 +38,9 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Keep the ADC ladder for reliable wake; reduce periodic sampling fourfold.
+CONFIG_BUTTON_PERIOD_TIME_MS=20
+CONFIG_BUTTON_DEBOUNCE_TICKS=1
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
 # Hotspot provisioning uses Wi-Fi only; leave Bluetooth and audio tasks inactive.

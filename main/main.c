@@ -4,6 +4,7 @@
 #include "bsp_i2c.h"
 #include "workout_store.h"
 #include "workout_ui.h"
+#include "workout_power.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
@@ -20,6 +21,10 @@ static bool s_network_started;
 static bool s_ui_dirty;
 static int64_t s_last_activity;
 static unsigned s_brightness = 100;
+static TaskHandle_t s_app_task;
+static bool s_screen_sleep;
+static bool s_battery_refresh;
+static int64_t s_power_retry;
 
 static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *user) {
     (void)user;
@@ -29,15 +34,47 @@ static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *user) {
     else if (event == BSP_BTN_CLICK) input = button == BSP_BTN_OK ? WORKOUT_INPUT_OK
                                              : button == BSP_BTN_UP ? WORKOUT_INPUT_UP : WORKOUT_INPUT_DOWN;
     else return;
-    if (s_input) (void)xQueueSend(s_input, &input, 0);
+    if (s_input && xQueueSend(s_input, &input, 0) == pdTRUE && s_app_task) xTaskNotifyGive(s_app_task);
+}
+
+static void on_network_update(void *user) {
+    xTaskNotifyGive((TaskHandle_t)user);
 }
 
 static void refresh(void) {
     s_ui_dirty = true;
+    if (!s_brightness) return;
     if (!bsp_lvgl_lock(500)) return;
     workout_ui_update(&s_state);
     s_ui_dirty = false;
     bsp_lvgl_unlock();
+}
+
+static bool wake_display(void) {
+    if (!s_brightness) {
+        esp_err_t err = ESP_FAIL;
+        if (bsp_lvgl_lock(1000)) {
+            err = bsp_lvgl_wake();
+            if (err == ESP_OK) {
+                s_screen_sleep = false;
+                workout_ui_update(&s_state);
+                err = bsp_lvgl_refresh();
+                s_ui_dirty = err != ESP_OK;
+                if (err == ESP_OK) s_battery_refresh = true;
+            }
+            bsp_lvgl_unlock();
+        }
+        if (err != ESP_OK) {
+            if (!s_power_retry) ESP_LOGW(TAG, "Display wake failed: %s", esp_err_to_name(err));
+            s_power_retry = esp_timer_get_time() + 1000000;
+            return false;
+        }
+    }
+    s_last_activity = esp_timer_get_time();
+    s_power_retry = 0;
+    s_brightness = 100;
+    bsp_display_backlight(100);
+    return true;
 }
 
 static void navigate_input(workout_input_t input) {
@@ -76,9 +113,7 @@ static void navigate_input(workout_input_t input) {
 
 static void handle_input(workout_input_t input) {
     bool waking = s_brightness == 0;
-    s_last_activity = esp_timer_get_time();
-    s_brightness = 100;
-    bsp_display_backlight(100);
+    if (!wake_display()) return;
     if (waking) return; /* The first key wakes the screen without changing pages. */
     if (s_state.codex_popup) {
         if (input == WORKOUT_INPUT_OK || input == WORKOUT_INPUT_MENU) {
@@ -91,8 +126,19 @@ static void handle_input(workout_input_t input) {
 }
 
 static void idle_backlight(void) {
-    int64_t idle = esp_timer_get_time() - s_last_activity;
-    unsigned brightness = idle >= 60000000 ? 0 : idle >= 30000000 ? 20 : 100;
+    int64_t now = esp_timer_get_time();
+    unsigned brightness = workout_idle_brightness((now - s_last_activity) / 1000);
+    if (!brightness) {
+        if (s_screen_sleep || now < s_power_retry) return;
+        s_brightness = 0;
+        s_ui_dirty = true;
+        bsp_display_backlight(0);
+        esp_err_t err = bsp_lvgl_sleep();
+        s_screen_sleep = err == ESP_OK;
+        if (err != ESP_OK && !s_power_retry) ESP_LOGW(TAG, "Display sleep failed: %s", esp_err_to_name(err));
+        s_power_retry = err == ESP_OK ? 0 : now + 1000000;
+        return;
+    }
     if (brightness == s_brightness) return;
     s_brightness = brightness;
     bsp_display_backlight((uint8_t)brightness);
@@ -120,9 +166,7 @@ static bool update_codex(void) {
             || !codex_alert_current(&s_state.codex, &alert, s_state.network.online, s_state.now_ms)) continue;
         s_state.codex_alert = alert;
         s_state.codex_popup = true;
-        s_last_activity = esp_timer_get_time();
-        s_brightness = 100;
-        bsp_display_backlight(100);
+        (void)wake_display();
         changed = true;
     }
     return changed;
@@ -173,6 +217,7 @@ static void start_network(void) {
             s_state.from_cache = true;
         }
     }
+    workout_network_set_notify(on_network_update, s_app_task);
     s_network_started = workout_network_start(&config, &cache) == ESP_OK;
     if (!s_network_started) s_state.network.error = WORKOUT_NET_INIT;
     memset(&config, 0, sizeof(config));
@@ -188,40 +233,60 @@ static void update_clock(void) {
     refresh();
 }
 
+static uint32_t app_wait_ms(int64_t next_battery, int64_t next_frame) {
+    int64_t now = esp_timer_get_time() / 1000;
+    int64_t deadlines[6] = {next_battery / 1000};
+    size_t count = 1;
+    if (s_brightness) {
+        deadlines[count++] = s_last_activity / 1000 + (s_brightness == 100 ? 30000 : 60000);
+        if (s_state.navigation.view == WORKOUT_VIEW_CODEX || s_state.navigation.view == WORKOUT_VIEW_CODEX_DETAILS
+            || s_state.codex_popup) deadlines[count++] = next_frame;
+        if (s_ui_dirty) deadlines[count++] = now + 1000;
+    } else if (!s_screen_sleep || s_state.codex_popup) deadlines[count++] = s_power_retry / 1000;
+    time_t wall = time(NULL);
+    deadlines[count++] = now + (60 - (wall > 0 ? wall % 60 : 0)) * 1000;
+    return workout_deadline_wait_ms(now, deadlines, count, 60000);
+}
+
 static void app_loop(void) {
     int64_t next_battery = 0, next_codex_frame = 0;
     for (;;) {
         workout_input_t input;
         update_clock();
-        if (xQueueReceive(s_input, &input, pdMS_TO_TICKS(100)) == pdTRUE) handle_input(input);
+        while (xQueueReceive(s_input, &input, 0) == pdTRUE) handle_input(input);
         s_state.now_ms = esp_timer_get_time() / 1000;
         update_network();
         int64_t now = esp_timer_get_time();
-        if (now >= next_battery) {
+        if (s_battery_refresh || now >= next_battery) {
             int battery = bsp_battery_soc();
             if (battery != s_state.battery) { s_state.battery = battery; refresh(); }
-            next_battery = now + 30000000;
+            s_battery_refresh = false;
+            next_battery = now + (s_brightness ? 30000000 : 300000000);
         }
+        if (s_state.codex_popup && !s_brightness && now >= s_power_retry) (void)wake_display();
         idle_backlight();
         if (s_state.now_ms >= next_codex_frame) {
             if (s_brightness && (s_state.navigation.view == WORKOUT_VIEW_CODEX
                 || s_state.navigation.view == WORKOUT_VIEW_CODEX_DETAILS)) refresh();
             next_codex_frame = (s_state.now_ms / 1000 + 1) * 1000;
         }
-        if (s_ui_dirty) refresh();
+        if (s_ui_dirty && s_brightness) refresh();
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(app_wait_ms(next_battery, next_codex_frame)));
     }
 }
 
 void app_main(void) {
     ESP_LOGI(TAG, "Workout dashboard starting");
-    const esp_pm_config_t power = {.max_freq_mhz = 160, .min_freq_mhz = 80, .light_sleep_enable = true};
-    (void)esp_pm_configure(&power);
+    const esp_pm_config_t power = {.max_freq_mhz = 160, .min_freq_mhz = 40, .light_sleep_enable = true};
+    esp_err_t err = esp_pm_configure(&power);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Power management unavailable: %s", esp_err_to_name(err));
     (void)bsp_i2c_init();
     if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
         ESP_LOGE(TAG, "Display initialization failed");
         return;
     }
     (void)bsp_battery_init();
+    s_app_task = xTaskGetCurrentTaskHandle();
     s_state.battery = bsp_battery_soc();
     s_input = xQueueCreate(8, sizeof(workout_input_t));
     if (!s_input || !bsp_lvgl_lock(1000)) { ESP_LOGE(TAG, "UI initialization failed"); return; }

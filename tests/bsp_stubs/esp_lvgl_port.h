@@ -9,6 +9,7 @@ typedef struct { int32_t x1, y1, x2, y2; } lv_area_t;
 typedef struct { lv_display_t *target; lv_area_t *area; } lv_event_t;
 typedef struct { int unused; } lv_event_dsc_t;
 typedef struct { int unused; } lvgl_port_cfg_t;
+typedef struct { bool paused; } lv_timer_t;
 #define ESP_LVGL_PORT_INIT_CONFIG() {0}
 #define LV_EVENT_FLUSH_START 1
 #define LV_COLOR_FORMAT_RGB565 1
@@ -23,6 +24,15 @@ typedef struct {
 } lvgl_port_display_cfg_t;
 esp_err_t lvgl_port_init(const lvgl_port_cfg_t *);
 esp_err_t lvgl_port_deinit(void);
+esp_err_t lvgl_port_stop(void);
+esp_err_t lvgl_port_resume(void);
+lv_timer_t *lv_timer_get_next(lv_timer_t *);
+bool lv_timer_get_paused(lv_timer_t *);
+void lv_timer_pause(lv_timer_t *);
+void lv_timer_resume(lv_timer_t *);
+void lv_timer_enable(bool);
+void lv_tick_inc(uint32_t);
+void lv_refr_now(lv_display_t *);
 bool lvgl_port_lock(uint32_t);
 void lvgl_port_unlock(void);
 lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *);

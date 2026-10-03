@@ -25,6 +25,8 @@ static ai_tokens_data_t s_wire_tokens;
 static ai_tokens_cache_t s_token_disk[AI_QUOTA_PROVIDERS];
 static bool s_tokens_http;
 static unsigned s_token_writes;
+static unsigned s_http_inits, s_http_cleanups, s_worker_signals, s_app_signals;
+static bool s_http_live, s_http_set_failure;
 
 void test_log(const char *tag, const char *format, ...) { (void)tag; (void)format; }
 int64_t esp_timer_get_time(void) { return s_clock * 1000; }
@@ -61,9 +63,12 @@ int xQueueOverwrite(QueueHandle_t queue, const void *value) {
 }
 void vQueueDelete(QueueHandle_t queue) { free(queue); }
 int xTaskCreate(void (*task)(void *), const char *name, unsigned stack, void *arg, unsigned priority, void *handle) {
-    (void)task; (void)name; (void)stack; (void)arg; (void)priority; (void)handle;
+    (void)task; (void)name; (void)stack; (void)arg; (void)priority;
+    if (handle) *(TaskHandle_t *)handle = &s_disk;
     return pdPASS;
 }
+void xTaskNotifyGive(TaskHandle_t task) { assert(task == &s_disk); s_worker_signals++; }
+unsigned ulTaskNotifyTake(int clear, unsigned timeout) { assert(clear == pdTRUE); (void)timeout; return 0; }
 esp_err_t esp_event_loop_create_default(void) { return ESP_OK; }
 esp_err_t esp_event_handler_instance_register(esp_event_base_t base, int32_t id,
     test_event_handler_t handler, void *arg, esp_event_handler_instance_t *instance) {
@@ -96,9 +101,23 @@ esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *access) {
 void esp_fill_random(void *output, size_t size) { memset(output, 7, size); }
 esp_err_t esp_read_mac(uint8_t *output, int kind) { (void)kind; memset(output, 8, 6); return ESP_OK; }
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config) {
+    assert(!s_http_live); s_http_live = true; s_http_inits++;
     strcpy(s_http_url, config->url); s_http_config = *config;
     s_http_monitor = strstr(s_http_url, "/api/codex/tasks") || strstr(s_http_url, "/api/codex/alerts");
     return &s_station;
+}
+esp_err_t esp_http_client_set_url(esp_http_client_handle_t client, const char *url) {
+    assert(client == &s_station && s_http_live);
+    if (s_http_set_failure) return ESP_FAIL;
+    strcpy(s_http_url, url);
+    s_http_monitor = strstr(url, "/api/codex/tasks") || strstr(url, "/api/codex/alerts");
+    return ESP_OK;
+}
+esp_err_t esp_http_client_set_timeout_ms(esp_http_client_handle_t client, int timeout) {
+    assert(client == &s_station && s_http_live); s_http_config.timeout_ms = timeout; return ESP_OK;
+}
+esp_err_t esp_http_client_set_user_data(esp_http_client_handle_t client, void *user) {
+    assert(client == &s_station && s_http_live); s_http_config.user_data = user; return ESP_OK;
 }
 esp_err_t esp_http_client_perform(esp_http_client_handle_t client) {
     (void)client;
@@ -119,7 +138,10 @@ int esp_http_client_get_status_code(esp_http_client_handle_t client) {
     if (s_tokens_http && strstr(s_http_url, "/tokens")) return 200;
     return s_monitor_http && s_http_monitor ? s_monitor_code : 503;
 }
-esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) { (void)client; return ESP_OK; }
+esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) {
+    assert(client == &s_station && s_http_live);
+    s_http_live = false; s_http_cleanups++; return ESP_OK;
+}
 esp_err_t esp_crt_bundle_attach(void *config) { (void)config; return ESP_OK; }
 esp_err_t esp_netif_sntp_init(const esp_sntp_config_t *config) {
     assert(strcmp(config->server, "pool.ntp.org") == 0);
@@ -186,6 +208,10 @@ bool codex_alerts_decode(const char *json, size_t size, codex_alert_page_t *page
 }
 
 static void fixture(void) {
+    close_http_client();
+    workout_network_set_notify(NULL, NULL);
+    s_http_inits = s_http_cleanups = s_worker_signals = s_app_signals = 0;
+    s_http_set_failure = false;
     if (s_commands) {
         vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates);
         vQueueDelete(s_tokens_updates);
@@ -449,12 +475,48 @@ static void token_sync_and_cache(void) {
     assert(!s_next_tokens[0] && !s_next_tokens[1]);
 }
 
+static void app_signal(void *user) { assert(user == &s_app_signals); s_app_signals++; }
+
+static void idle_deadlines_and_connections(void) {
+    monitor_fixture();
+    workout_network_set_notify(app_signal, &s_app_signals);
+    s_next_sync = s_clock + 300000;
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = s_next_tokens[i] = s_clock + 60000;
+    s_next_codex_tasks = s_clock + 5000; s_next_codex_alerts = s_clock + 7000;
+    assert(network_wait_ms() == 5000); /* No fixed 250ms wake while nothing is due. */
+    unsigned inits = s_http_inits;
+    sync_codex_tasks(); sync_codex_alerts();
+    assert(s_http_inits == inits && s_http_live && !s_http_config.user_data && s_app_signals == 2);
+    unsigned signals = s_worker_signals;
+    assert(workout_network_request(WORKOUT_ACTION_CODEX_SYNC));
+    assert(s_worker_signals == signals + 1); command();
+    assert(network_wait_ms() == 0);
+    s_http_set_failure = true; sync_codex_tasks();
+    assert(!s_http_live && !s_http_client && s_codex.failed);
+    s_http_set_failure = false; sync_codex_tasks(); assert(s_http_live && !s_codex.failed);
+    s_monitor_code = 503; sync_codex_tasks(); assert(!s_http_live && !s_http_client);
+    s_monitor_code = 200; sync_codex_tasks();
+    signals = s_worker_signals;
+    wifi_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
+    assert(s_worker_signals == signals + 1 && !s_commands->count); /* Events use no command slots. */
+    network_tick(); assert(!s_http_live && !s_http_client);
+    got_ip("Home"); network_tick(); sync_codex_tasks();
+    assert(s_http_live);
+    start_setup(); assert(!s_http_live);
+    stop_setup(); sync_codex_tasks(); assert(s_http_live);
+    assert(workout_network_select(WORKOUT_ACTION_SWITCH_SERVER, 1)); command();
+    assert(!s_http_live && !s_codex.available);
+    s_ready = false; assert(network_wait_ms() == 60000);
+}
+
 int main(void) {
     automatic_fallback(); manual_wifi(); server_switch(); cooldown_and_setup(); automatic_storage_retry();
     monitoring_replay(); monitoring_backpressure(); monitoring_source_and_expiry();
     monitoring_slow_legacy();
     home_clock_sync();
     token_sync_and_cache();
+    idle_deadlines_and_connections();
+    close_http_client();
     vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates); vEventGroupDelete(s_events);
     vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts);
     vQueueDelete(s_tokens_updates);

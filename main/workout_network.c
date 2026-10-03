@@ -3,6 +3,7 @@
 #include "workout_json.h"
 #include "workout_portal.h"
 #include "workout_store.h"
+#include "workout_power.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -64,11 +65,16 @@ static unsigned s_monitor_budget;
 static bool s_monitor_alert_turn;
 static bool s_persisted, s_ready;
 static bool s_time_started;
+static void (*s_notify)(void *);
+static void *s_notify_user;
+static esp_http_client_handle_t s_http_client;
+static TaskHandle_t s_task;
 static esp_netif_t *s_sta, *s_ap;
 static esp_event_handler_instance_t s_wifi_handler, s_ip_handler;
 static bool s_wifi_registered, s_ip_registered;
 static int64_t s_next_sync, s_setup_deadline, s_pending_deadline, s_close_at;
 static void sync_data(void);
+static void close_http_client(void);
 
 typedef struct {
     int kind;
@@ -83,6 +89,15 @@ typedef struct {
 } http_body_t;
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+void workout_network_set_notify(void (*notify)(void *), void *user) {
+    s_notify = notify;
+    s_notify_user = user;
+}
+
+static void notify_app(void) {
+    if (s_notify) s_notify(s_notify_user);
+}
 
 void workout_network_status(workout_network_status_t *status) {
     portENTER_CRITICAL(&s_status_lock);
@@ -166,7 +181,10 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         s_status.online = false;
         s_status.revision++;
         portEXIT_CRITICAL(&s_status_lock);
-    }
+    } else return;
+    // Wake without consuming a configuration-command slot or touching HTTP.
+    if (s_task) xTaskNotifyGive(s_task);
+    notify_app();
 }
 
 static void wifi_rollback(void) {
@@ -260,6 +278,7 @@ static void start_setup(void) {
     workout_network_status_t status;
     workout_network_status(&status);
     if (status.setup_active) return;
+    close_http_client();
     uint8_t random[28], mac[6];
     esp_fill_random(random, sizeof(random));
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
@@ -296,7 +315,9 @@ bool workout_network_request(workout_action_t action) {
     if (!s_commands || action == WORKOUT_ACTION_NONE || action == WORKOUT_ACTION_SWITCH_WIFI
         || action == WORKOUT_ACTION_SWITCH_SERVER) return false;
     const network_command_t command = {.kind = action};
-    return xQueueSend(s_commands, &command, 0) == pdTRUE;
+    bool accepted = xQueueSend(s_commands, &command, 0) == pdTRUE;
+    if (accepted && s_task) xTaskNotifyGive(s_task);
+    return accepted;
 }
 
 bool workout_network_select(workout_action_t action, unsigned selection) {
@@ -314,7 +335,10 @@ bool workout_network_select(workout_action_t action, unsigned selection) {
     portEXIT_CRITICAL(&s_status_lock);
     if (!accepted) return false;
     const network_command_t command = {.kind = action, .selection = selection};
-    if (xQueueSend(s_commands, &command, 0) == pdTRUE) return true;
+    if (xQueueSend(s_commands, &command, 0) == pdTRUE) {
+        if (s_task) xTaskNotifyGive(s_task);
+        return true;
+    }
     switch_result(WORKOUT_SWITCH_IDLE);
     return false;
 }
@@ -331,6 +355,7 @@ bool workout_network_submit(const workout_config_t *config, const char *token) {
     network_command_t command = {.kind = COMMAND_APPLY, .config = *config};
     accepted = xQueueSend(s_commands, &command, 0) == pdTRUE;
     memset(&command, 0, sizeof(command));
+    if (accepted && s_task) xTaskNotifyGive(s_task);
     if (!accepted) setup_result(WORKOUT_SETUP_WAITING, false);
     return accepted;
 }
@@ -357,6 +382,7 @@ bool workout_network_take_alert(codex_alert_t *alert) {
 
 static void codex_publish(void) {
     if (s_codex_updates) xQueueOverwrite(s_codex_updates, &s_codex);
+    notify_app();
 }
 
 static void codex_reset(void) {
@@ -370,6 +396,7 @@ static void codex_reset(void) {
 
 static void quota_publish(void) {
     xQueueOverwrite(s_quota_updates, &s_quota);
+    notify_app();
 }
 
 static void quota_restore(void) {
@@ -388,6 +415,7 @@ static void quota_restore(void) {
 
 static void tokens_publish(void) {
     xQueueOverwrite(s_tokens_updates, &s_tokens);
+    notify_app();
 }
 
 static void tokens_restore(void) {
@@ -430,20 +458,34 @@ static bool https_clock(void) {
     return esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK;
 }
 
+static void close_http_client(void) {
+    if (s_http_client) esp_http_client_cleanup(s_http_client);
+    s_http_client = NULL;
+}
+
 static bool fetch_body(const char *url, http_body_t *body, int *code, int timeout_ms) {
     *code = 0;
     if (!https_clock()) return false;
     body->body = calloc(1, WORKOUT_JSON_LIMIT + 1);
     if (!body->body) return false;
-    esp_http_client_config_t config = {
-        .url = url, .timeout_ms = timeout_ms, .buffer_size = 1024,
-        .buffer_size_tx = 512, .event_handler = http_event, .user_data = body,
-        .disable_auto_redirect = true, .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_err_t err = client ? esp_http_client_perform(client) : ESP_ERR_NO_MEM;
-    *code = client ? esp_http_client_get_status_code(client) : 0;
-    if (client) esp_http_client_cleanup(client);
+    if (!s_http_client) {
+        const esp_http_client_config_t config = {
+            .url = url, .timeout_ms = timeout_ms, .buffer_size = 1024,
+            .buffer_size_tx = 512, .event_handler = http_event,
+            .disable_auto_redirect = true, .crt_bundle_attach = esp_crt_bundle_attach,
+        };
+        s_http_client = esp_http_client_init(&config);
+    }
+    esp_err_t err = s_http_client ? esp_http_client_set_url(s_http_client, url) : ESP_ERR_NO_MEM;
+    if (err == ESP_OK) err = esp_http_client_set_timeout_ms(s_http_client, timeout_ms);
+    if (err == ESP_OK) err = esp_http_client_set_user_data(s_http_client, body);
+    if (err == ESP_OK) {
+        err = esp_http_client_perform(s_http_client);
+        *code = esp_http_client_get_status_code(s_http_client);
+    }
+    // The response buffer belongs to this request, never to the retained client.
+    if (s_http_client) (void)esp_http_client_set_user_data(s_http_client, NULL);
+    if (err != ESP_OK || *code >= 500 || body->oversized) close_http_client();
     return err == ESP_OK && *code == 200 && !body->oversized;
 }
 
@@ -678,6 +720,7 @@ static void sync_data(void) {
     s_cache = cache;
     const workout_network_update_t update = {.available = true, .persisted = s_persisted, .data = data};
     xQueueOverwrite(s_updates, &update);
+    notify_app();
     network_error(WORKOUT_NET_OK, 200);
     portENTER_CRITICAL(&s_status_lock);
     s_status.cache_error = !s_persisted;
@@ -701,6 +744,7 @@ static void cancel_candidate(workout_setup_result_t result) {
 
 static void activate_config(const workout_config_t *config) {
     bool new_source = strcmp(s_config.server, config->server) != 0;
+    close_http_client();
     s_config = *config;
     quota_source_changed();
     if (new_source) {
@@ -710,6 +754,7 @@ static void activate_config(const workout_config_t *config) {
         s_persisted = false;
         const workout_network_update_t update = {0};
         xQueueOverwrite(s_updates, &update);
+        notify_app();
     }
     s_next_sync = 0;
     s_sync_turn = 0;
@@ -859,6 +904,7 @@ static void connection_cleared(void) {
 
 static void clear_config(void) {
     if (workout_store_clear_config() != ESP_OK) { setup_result(WORKOUT_SETUP_STORAGE, false); return; }
+    close_http_client();
     s_pending_deadline = 0;
     memset(&s_candidate, 0, sizeof(s_candidate));
     memset(&s_config, 0, sizeof(s_config));
@@ -920,6 +966,7 @@ static void process_command(const network_command_t *command) {
 static void network_tick(void) {
     int64_t now = now_ms();
     EventBits_t bits = xEventGroupGetBits(s_events);
+    if (!(bits & CONNECTED_BIT)) close_http_client();
     if (bits & JUST_CONNECTED_BIT) {
         xEventGroupClearBits(s_events, JUST_CONNECTED_BIT);
         start_clock();
@@ -948,6 +995,34 @@ static void network_tick(void) {
     sync_due(now, (bits & CONNECTED_BIT) != 0);
 }
 
+static uint32_t network_wait_ms(void) {
+    if (!s_ready) return 60000;
+    int64_t now = now_ms();
+    EventBits_t bits = xEventGroupGetBits(s_events);
+    workout_network_status_t status;
+    workout_network_status(&status);
+    if ((bits & JUST_CONNECTED_BIT) || ((bits & DISCONNECTED_BIT)
+        && !status.setup_active && s_profiles.wifi_count)) return 0;
+    if (s_pending_deadline) return workout_deadline_wait_ms(now, &s_pending_deadline, 1, 60000);
+    int64_t deadlines[7 + AI_QUOTA_PROVIDERS * 2];
+    size_t count = 0;
+    if (s_close_at) deadlines[count++] = s_close_at;
+    if (s_setup_deadline) deadlines[count++] = s_setup_deadline;
+    if (!status.setup_active && s_profiles.wifi_count && !(bits & CONNECTED_BIT))
+        deadlines[count++] = s_retry.deadline;
+    if (s_profile_dirty && (bits & CONNECTED_BIT)) deadlines[count++] = s_next_profile_save;
+    if (s_config.ssid[0]) {
+        deadlines[count++] = s_next_sync;
+        deadlines[count++] = s_next_codex_tasks;
+        deadlines[count++] = s_next_codex_alerts;
+        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+            deadlines[count++] = s_next_quota[i];
+            deadlines[count++] = s_next_tokens[i];
+        }
+    }
+    return workout_deadline_wait_ms(now, deadlines, count, 60000);
+}
+
 static void network_task(void *arg) {
     (void)arg;
     s_ready = wifi_init() == ESP_OK;
@@ -956,12 +1031,20 @@ static void network_task(void *arg) {
         else start_setup();
     } else network_error(WORKOUT_NET_INIT, 0);
     network_command_t command;
+    uint32_t revision = UINT32_MAX;
     for (;;) {
-        if (xQueueReceive(s_commands, &command, pdMS_TO_TICKS(250)) == pdTRUE) {
+        while (xQueueReceive(s_commands, &command, 0) == pdTRUE) {
             process_command(&command);
             memset(&command, 0, sizeof(command));
         }
         if (s_ready) network_tick();
+        workout_network_status_t status;
+        workout_network_status(&status);
+        if (status.revision != revision) {
+            revision = status.revision;
+            notify_app();
+        }
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(network_wait_ms()));
     }
 }
 
@@ -996,7 +1079,7 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
         quota_restore();
         tokens_restore();
     }
-    if (queues && xTaskCreate(network_task, "workout_net", 7168, NULL, 4, NULL) == pdPASS) return ESP_OK;
+    if (queues && xTaskCreate(network_task, "workout_net", 7168, NULL, 4, &s_task) == pdPASS) return ESP_OK;
     if (s_events) vEventGroupDelete(s_events);
     if (s_commands) vQueueDelete(s_commands);
     if (s_updates) vQueueDelete(s_updates);

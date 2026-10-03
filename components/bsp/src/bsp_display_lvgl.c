@@ -5,6 +5,9 @@
 #include "bsp_pins.h"
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_timer.h"
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "bsp_lvgl";
@@ -14,6 +17,10 @@ static const char *TAG = "bsp_lvgl";
 static lv_display_t *s_disp;
 static bool s_port_initialized;
 static bool s_port_init_failed;
+static bool s_suspended, s_sleeping;
+static int64_t s_suspend_time;
+static lv_timer_t **s_paused_timers;
+static size_t s_paused_count;
 
 static void rounded_flush_event(lv_event_t *event)
 {
@@ -129,4 +136,86 @@ bool bsp_lvgl_lock(int timeout_ms) {
 }
 void bsp_lvgl_unlock(void) {
     if (s_disp) lvgl_port_unlock();
+}
+
+static esp_err_t pause_timers(void) {
+    size_t count = 0;
+    for (lv_timer_t *timer = lv_timer_get_next(NULL); timer; timer = lv_timer_get_next(timer)) {
+        if (!lv_timer_get_paused(timer)) count++;
+    }
+    s_paused_timers = count ? calloc(count, sizeof(*s_paused_timers)) : NULL;
+    if (count && !s_paused_timers) return ESP_ERR_NO_MEM;
+    for (lv_timer_t *timer = lv_timer_get_next(NULL); timer; timer = lv_timer_get_next(timer)) {
+        if (lv_timer_get_paused(timer)) continue;
+        s_paused_timers[s_paused_count++] = timer;
+        lv_timer_pause(timer);
+    }
+    return ESP_OK;
+}
+
+static void resume_timers(void) {
+    for (size_t i = 0; i < s_paused_count; i++) lv_timer_resume(s_paused_timers[i]);
+    free(s_paused_timers);
+    s_paused_timers = NULL;
+    s_paused_count = 0;
+}
+
+esp_err_t bsp_lvgl_sleep(void) {
+    if (!s_disp) return ESP_ERR_INVALID_STATE;
+    if (!bsp_lvgl_lock(1000)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_OK;
+    if (!s_suspended) {
+        err = pause_timers();
+        if (err == ESP_OK) {
+            err = lvgl_port_stop();
+            if (err == ESP_OK) {
+                s_suspended = true;
+                s_suspend_time = esp_timer_get_time();
+                // Port 2.9 disables the handler, which LVGL 9.5 answers with a
+                // 1ms retry. Keep it enabled with all timers individually paused
+                // so it returns LV_NO_TIMER_READY and the task can really wait.
+                lv_timer_enable(true);
+            } else {
+                lv_timer_enable(true);
+                resume_timers();
+            }
+        }
+    }
+    if (err == ESP_OK && !s_sleeping) {
+        err = bsp_display_sleep();
+        s_sleeping = err == ESP_OK;
+    }
+    bsp_lvgl_unlock();
+    return err;
+}
+
+esp_err_t bsp_lvgl_wake(void) {
+    if (!s_disp) return ESP_ERR_INVALID_STATE;
+    if (!bsp_lvgl_lock(1000)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_OK;
+    if (s_suspended) {
+        err = bsp_display_wake();
+        if (err == ESP_OK) {
+            int64_t now = esp_timer_get_time();
+            lv_tick_inc((uint32_t)((now - s_suspend_time) / 1000));
+            s_suspend_time = now;
+            err = lvgl_port_resume();
+            if (err == ESP_OK) {
+                resume_timers();
+                s_suspended = s_sleeping = false;
+            } else lv_timer_enable(true);
+        }
+    }
+    bsp_lvgl_unlock();
+    return err;
+}
+
+esp_err_t bsp_lvgl_refresh(void) {
+    if (!s_disp || s_suspended) return ESP_ERR_INVALID_STATE;
+    if (!bsp_lvgl_lock(1000)) return ESP_ERR_TIMEOUT;
+    lv_refr_now(s_disp);
+    // A commandless parameter transaction waits for all pending SPI color data.
+    esp_err_t err = esp_lcd_panel_io_tx_param(bsp_display_io(), -1, NULL, 0);
+    bsp_lvgl_unlock();
+    return err;
 }

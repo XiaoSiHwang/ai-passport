@@ -24,6 +24,11 @@ esp_lcd_panel_io_handle_t bsp_display_io(void);
 // 背光亮度 0..100(%)。LEDC PWM,0=全灭。
 void bsp_display_backlight(uint8_t percent);
 
+// 可恢复的 LCD 休眠/唤醒，保留 SPI、LEDC 和引脚配置；唤醒后背光仍为 0。
+// 调用方必须先阻止新绘制，并串行调用。可能阻塞约 100ms；失败后可重试 wake。
+esp_err_t bsp_display_sleep(void);
+esp_err_t bsp_display_wake(void);
+
 // deep sleep 专用：关闭显示、让 ST7789 进入 Sleep In，停止背光 PWM，
 // 将 CS/SCLK/MOSI/DC/背光设为安全电平并在 deep sleep 中保持。调用时必须
 // 已阻止 LVGL 刷屏，调用后必须立即进入 deep sleep 或重启。
@@ -46,3 +51,13 @@ struct _lv_display_t *bsp_lvgl_init(void);
 // LVGL 尚未就绪或超时时 lock 返回 false；只有 lock 成功后才调用 unlock。
 bool bsp_lvgl_lock(int timeout_ms);
 void bsp_lvgl_unlock(void);
+
+// 应用任务调用的可恢复待机接口：暂停现存 LVGL timers/tick，再休眠 LCD。
+// 休眠期间不要修改 LVGL 对象或创建/删除 timer；后台只更新应用缓存。
+// 失败可能已暂停绘制，必须调用 wake 恢复；重复调用可重试。不会开启背光。
+esp_err_t bsp_lvgl_sleep(void);
+esp_err_t bsp_lvgl_wake(void);
+
+// 同步绘制当前待刷新内容并等待 SPI 传输完成，用于开启背光前呈现最新画面。
+// 与 sleep/wake 一样内部持有 LVGL 锁；可在已经持有递归锁时调用。
+esp_err_t bsp_lvgl_refresh(void);

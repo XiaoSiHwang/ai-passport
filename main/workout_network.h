@@ -51,6 +51,9 @@ typedef struct {
 } workout_network_update_t;
 
 /* App-lifetime services; no worker/callback holds pointers to LVGL objects. */
+/* Register once before start. Called from worker/event tasks: only signal the app,
+ * never access LVGL or block. The callback and user must outlive the service. */
+void workout_network_set_notify(void (*notify)(void *), void *user);
 esp_err_t workout_network_start(const workout_config_t *config, const workout_cache_t *cache);
 bool workout_network_request(workout_action_t action);
 bool workout_network_select(workout_action_t action, unsigned selection);
