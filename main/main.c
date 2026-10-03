@@ -151,6 +151,7 @@ static void update_network(void) {
         changed = true;
     }
     if (workout_network_take_quota(&s_state.quota)) changed = true;
+    if (workout_network_take_tokens(&s_state.tokens)) changed = true;
     if (update_codex()) changed = true;
     if (changed) refresh();
 }

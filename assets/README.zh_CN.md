@@ -24,6 +24,8 @@
 固件不需要编译或保留完整 OTF。
 
 可打印 ASCII 和固定中文字符集保存在 `fonts/workout_symbols.txt`。
+生成器同时扫描 `main/ai_tokens.c` 的大数单位及 `main/workout_ui.c` 的
+Token、热力图与失败状态文案，为三个字号生成完整字形。
 `fonts/workout_font_inventory.h` 用于运行时字形检查，静态测试检查各字体生成的 cmap。
 三个字体源文件通过 `main/CMakeLists.txt` 编译。动态网络名称使用独立的
 `fonts/workout_network_font_16.c`：放在 Flash 中的 2 bpp Noto CJK 字体，包含

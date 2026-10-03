@@ -21,6 +21,10 @@ static unsigned s_sntp_calls;
 static esp_err_t s_sntp_result;
 static codex_tasks_data_t s_wire_tasks;
 static codex_alert_page_t s_wire_alerts;
+static ai_tokens_data_t s_wire_tokens;
+static ai_tokens_cache_t s_token_disk[AI_QUOTA_PROVIDERS];
+static bool s_tokens_http;
+static unsigned s_token_writes;
 
 void test_log(const char *tag, const char *format, ...) { (void)tag; (void)format; }
 int64_t esp_timer_get_time(void) { return s_clock * 1000; }
@@ -98,6 +102,12 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
 }
 esp_err_t esp_http_client_perform(esp_http_client_handle_t client) {
     (void)client;
+    if (s_tokens_http && strstr(s_http_url, "/tokens")) {
+        esp_http_client_event_t event = {.event_id = HTTP_EVENT_ON_DATA, .user_data = s_http_config.user_data,
+            .data = "tokens", .data_len = 6};
+        assert(s_http_config.timeout_ms == 8000);
+        return s_http_config.event_handler(&event);
+    }
     if (!s_monitor_http || !s_http_monitor) { s_clock += s_legacy_delay; return ESP_FAIL; }
     esp_http_client_event_t event = {.event_id = HTTP_EVENT_ON_DATA, .user_data = s_http_config.user_data,
                                     .data = "monitor", .data_len = 7};
@@ -105,7 +115,9 @@ esp_err_t esp_http_client_perform(esp_http_client_handle_t client) {
     return s_http_config.event_handler(&event);
 }
 int esp_http_client_get_status_code(esp_http_client_handle_t client) {
-    (void)client; return s_monitor_http && s_http_monitor ? s_monitor_code : 503;
+    (void)client;
+    if (s_tokens_http && strstr(s_http_url, "/tokens")) return 200;
+    return s_monitor_http && s_http_monitor ? s_monitor_code : 503;
 }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) { (void)client; return ESP_OK; }
 esp_err_t esp_crt_bundle_attach(void *config) { (void)config; return ESP_OK; }
@@ -130,12 +142,28 @@ esp_err_t workout_store_load_quota(unsigned provider, ai_quota_cache_t *cache) {
 esp_err_t workout_store_save_quota(unsigned provider, const ai_quota_cache_t *cache) {
     (void)provider; (void)cache; return ESP_OK;
 }
+esp_err_t workout_store_load_tokens(unsigned provider, ai_tokens_cache_t *cache) {
+    *cache = s_token_disk[provider];
+    return cache->magic ? ESP_OK : ESP_ERR_NVS_NOT_FOUND;
+}
+esp_err_t workout_store_save_tokens(unsigned provider, const ai_tokens_cache_t *cache) {
+    assert(ai_tokens_cache_valid(cache, sizeof(*cache), provider));
+    if (s_write_failure) return ESP_FAIL;
+    s_token_disk[provider] = *cache; s_token_writes++;
+    return ESP_OK;
+}
 esp_err_t workout_store_save_cache(const workout_cache_t *cache) { (void)cache; return ESP_OK; }
 bool workout_decode_response(const char *json, size_t size, workout_data_t *data) {
     (void)json; (void)size; (void)data; return false;
 }
 bool ai_quota_decode_response(const char *json, size_t size, unsigned provider, ai_quota_data_t *data) {
     (void)json; (void)size; (void)provider; (void)data; return false;
+}
+bool ai_tokens_decode_response(const char *json, size_t size, unsigned provider, ai_tokens_data_t *data) {
+    (void)json; (void)size; (void)provider;
+    if (!s_tokens_http || !ai_tokens_data_valid(&s_wire_tokens)) return false;
+    *data = s_wire_tokens;
+    return true;
 }
 
 bool codex_tasks_decode(const char *json, size_t size, codex_tasks_data_t *data) {
@@ -160,6 +188,7 @@ bool codex_alerts_decode(const char *json, size_t size, codex_alert_page_t *page
 static void fixture(void) {
     if (s_commands) {
         vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates);
+        vQueueDelete(s_tokens_updates);
         vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts); vEventGroupDelete(s_events);
     }
     memset(&s_disk, 0, sizeof(s_disk));
@@ -171,6 +200,9 @@ static void fixture(void) {
     assert(workout_profiles_config(&s_disk, &config));
     memset(&s_status, 0, sizeof(s_status)); memset(&s_retry, 0, sizeof(s_retry));
     memset(&s_cache, 0, sizeof(s_cache)); memset(&s_quota, 0, sizeof(s_quota));
+    memset(&s_tokens, 0, sizeof(s_tokens)); memset(s_tokens_cache, 0, sizeof(s_tokens_cache));
+    memset(s_token_disk, 0, sizeof(s_token_disk)); memset(&s_wire_tokens, 0, sizeof(s_wire_tokens));
+    s_tokens_http = false; s_token_writes = 0;
     s_profile_dirty = s_profile_error = s_manual_switch = false;
     s_pending_deadline = s_setup_deadline = s_close_at = s_next_sync = 0;
     s_write_failure = s_queue_failure = s_association = false;
@@ -237,10 +269,13 @@ static void server_switch(void) {
     fixture(); network_tick(); got_ip("Home"); network_tick();
     s_cache.magic = WORKOUT_CACHE_MAGIC; s_quota_cache[0].magic = AI_QUOTA_MAGIC;
     s_quota_cache[0].source = 123; s_quota.providers[0].available = true;
+    s_tokens_cache[0].magic = AI_TOKENS_MAGIC;
+    s_tokens_cache[0].source = 123; s_tokens.providers[0].available = true;
     unsigned connections = s_connect_calls;
     assert(workout_network_select(WORKOUT_ACTION_SWITCH_SERVER, 1)); command();
     assert(s_disk.active_wifi == 0 && s_disk.active_server == 1 && s_connect_calls == connections);
     assert(!s_cache.magic && !s_quota.providers[0].available);
+    assert(!s_tokens_cache[0].magic && !s_tokens.providers[0].available);
     workout_network_update_t update;
     assert(workout_network_take_update(&update) && !update.available);
     network_tick(); assert(strcmp(s_http_url, "http://office.example.com/api/workout") == 0);
@@ -381,13 +416,48 @@ static void home_clock_sync(void) {
     assert(https_clock() && s_time_started && s_sntp_calls == 2);
 }
 
+static void token_sync_and_cache(void) {
+    fixture(); got_ip("Home"); network_tick();
+    s_tokens_http = true;
+    strcpy(s_wire_tokens.start_date, "2026-09-04"); strcpy(s_wire_tokens.end_date, "2026-10-03");
+    strcpy(s_wire_tokens.fetched_at, "2026-10-03T12:00:00+08:00");
+    int64_t day;
+    assert(workout_parse_date(s_wire_tokens.start_date, &day)); s_wire_tokens.start_day = (int32_t)day;
+    assert(workout_parse_timestamp(s_wire_tokens.fetched_at, &s_wire_tokens.fetched_seconds));
+    s_wire_tokens.known = UINT32_C(1) << 29; s_wire_tokens.available_days = 1;
+    s_wire_tokens.total = s_wire_tokens.daily[29] = 5000000000;
+    s_quota.providers[0].available = true;
+    sync_tokens(0);
+    assert(strcmp(s_http_url, "http://home.example.com/api/codex/tokens") == 0);
+    assert(s_token_writes == 1 && s_tokens.providers[0].persisted && s_tokens.providers[0].available);
+    sync_tokens(0); assert(s_token_writes == 1); /* Unchanged snapshots do not write NVS. */
+    ai_tokens_update_t update;
+    assert(workout_network_take_tokens(&update) && update.providers[0].data.total == 5000000000);
+    s_tokens_http = false; sync_tokens(0);
+    assert(s_tokens.providers[0].failed && s_tokens.providers[0].data.total == 5000000000);
+    assert(s_quota.providers[0].available && s_next_tokens[0] == s_clock + RECONNECT_INTERVAL_MS);
+    s_tokens_http = true; s_write_failure = true; sync_tokens(1);
+    assert(s_tokens.providers[1].available && !s_tokens.providers[1].persisted);
+    s_write_failure = false; sync_tokens(1);
+    assert(s_tokens.providers[1].persisted && s_token_writes == 2);
+    s_wire_tokens.fetched_seconds--; sync_tokens(0);
+    assert(s_tokens.providers[0].failed && s_token_writes == 2);
+    s_wire_tokens.fetched_seconds++;
+    memset(&s_tokens, 0, sizeof(s_tokens)); tokens_restore();
+    assert(s_tokens.providers[0].from_cache && s_tokens.providers[1].from_cache);
+    assert(workout_network_request(WORKOUT_ACTION_SYNC)); command();
+    assert(!s_next_tokens[0] && !s_next_tokens[1]);
+}
+
 int main(void) {
     automatic_fallback(); manual_wifi(); server_switch(); cooldown_and_setup(); automatic_storage_retry();
     monitoring_replay(); monitoring_backpressure(); monitoring_source_and_expiry();
     monitoring_slow_legacy();
     home_clock_sync();
+    token_sync_and_cache();
     vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates); vEventGroupDelete(s_events);
     vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts);
+    vQueueDelete(s_tokens_updates);
     puts("Workout worker network fault injection: PASS");
     return 0;
 }

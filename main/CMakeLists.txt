@@ -4,6 +4,7 @@ idf_component_register(
          "passport_calendar.c"
          "workout_profiles.c"
          "ai_quota.c"
+         "ai_tokens.c"
          "codex_monitor.c"
          "workout_json.c"
          "workout_store.c"

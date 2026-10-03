@@ -107,3 +107,16 @@ esp_err_t workout_store_save_quota(unsigned provider, const ai_quota_cache_t *ca
     if (!ai_quota_cache_valid(cache, sizeof(*cache), provider)) return ESP_ERR_INVALID_ARG;
     return write_blob(provider ? "glm" : "codex", cache, sizeof(*cache));
 }
+
+esp_err_t workout_store_load_tokens(unsigned provider, ai_tokens_cache_t *cache) {
+    if (provider >= AI_QUOTA_PROVIDERS) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = read_blob(provider ? "glm_tokens" : "codex_tokens", cache, sizeof(*cache));
+    if (err == ESP_OK && !ai_tokens_cache_valid(cache, sizeof(*cache), provider)) err = ESP_ERR_INVALID_CRC;
+    if (err != ESP_OK) memset(cache, 0, sizeof(*cache));
+    return err;
+}
+
+esp_err_t workout_store_save_tokens(unsigned provider, const ai_tokens_cache_t *cache) {
+    if (!ai_tokens_cache_valid(cache, sizeof(*cache), provider)) return ESP_ERR_INVALID_ARG;
+    return write_blob(provider ? "glm_tokens" : "codex_tokens", cache, sizeof(*cache));
+}

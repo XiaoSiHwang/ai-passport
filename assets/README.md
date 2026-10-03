@@ -26,6 +26,8 @@ The input OTF SHA-256 is
 It is not necessary to compile or retain the full OTF in firmware.
 
 Printable ASCII and the fixed Chinese inventory are in `fonts/workout_symbols.txt`.
+The generator also scans `main/ai_tokens.c` for the large-amount unit and
+`main/workout_ui.c` for Token, heatmap and failure-state labels at all three sizes.
 `fonts/workout_font_inventory.h` drives runtime glyph checks; static tests check
 each generated cmap. Compile all three sources through `main/CMakeLists.txt`.
 Dynamic network names use `fonts/workout_network_font_16.c`, an independent 2 bpp

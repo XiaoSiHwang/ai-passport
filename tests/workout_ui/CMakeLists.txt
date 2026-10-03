@@ -8,6 +8,7 @@ get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_subdirectory("${REPO_ROOT}/managed_components/lvgl__lvgl" lvgl)
 add_executable(workout_ui_host test_workout_ui.c
     "${REPO_ROOT}/main/workout_ui.c" "${REPO_ROOT}/main/workout_model.c" "${REPO_ROOT}/main/ai_quota.c"
+    "${REPO_ROOT}/main/ai_tokens.c"
     "${REPO_ROOT}/main/workout_profiles.c"
     "${REPO_ROOT}/main/passport_calendar.c"
     "${REPO_ROOT}/main/codex_monitor.c"

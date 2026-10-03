@@ -76,6 +76,8 @@ typedef struct {
     unsigned setup_step;
     unsigned ai_provider;
     bool ai_weekly;
+    bool ai_heatmap;
+    unsigned ai_day;
     unsigned wifi_count, server_count;
     unsigned codex_count, codex_selection;
     unsigned home_focus;

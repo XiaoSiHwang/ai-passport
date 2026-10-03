@@ -221,6 +221,10 @@ static workout_action_t menu_navigate(workout_navigation_t *nav, workout_input_t
     if (input == WORKOUT_INPUT_DOWN) nav->selection = (nav->selection + 1) % WORKOUT_MENU_COUNT;
     if (input != WORKOUT_INPUT_OK) return WORKOUT_ACTION_NONE;
     nav->view = workout_menu_view(nav->selection);
+    if (nav->view == WORKOUT_VIEW_AI) {
+        nav->ai_weekly = nav->ai_heatmap = false;
+        nav->ai_day = 29;
+    }
     bool sync = nav->selection == 4;
     nav->selection = 0;
     return sync ? WORKOUT_ACTION_SYNC : WORKOUT_ACTION_NONE;
@@ -251,6 +255,8 @@ static void home_navigate(workout_navigation_t *nav, workout_input_t input) {
         nav->view = WORKOUT_VIEW_AI;
         nav->ai_provider = nav->home_focus == 2;
         nav->ai_weekly = false;
+        nav->ai_heatmap = false;
+        nav->ai_day = 29;
     } else if (nav->clock_valid) {
         nav->view = WORKOUT_VIEW_CALENDAR;
         nav->calendar_day = nav->today;
@@ -274,6 +280,17 @@ static void codex_navigate(workout_navigation_t *nav, workout_input_t input) {
         ? WORKOUT_VIEW_CODEX_DETAILS : WORKOUT_VIEW_CODEX;
 }
 
+static void ai_navigate(workout_navigation_t *nav, workout_input_t input) {
+    if (input == WORKOUT_INPUT_OK) {
+        if (nav->ai_heatmap) nav->ai_heatmap = nav->ai_weekly = false;
+        else if (nav->ai_weekly) { nav->ai_heatmap = true; nav->ai_day = 29; }
+        else nav->ai_weekly = true;
+    } else if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) {
+        if (nav->ai_heatmap) nav->ai_day = (nav->ai_day + (input == WORKOUT_INPUT_UP ? 29 : 1)) % 30;
+        else { nav->ai_provider ^= 1; nav->ai_weekly = false; }
+    }
+}
+
 workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t input) {
     if (input == WORKOUT_INPUT_MENU) {
         return open_menu(nav);
@@ -292,11 +309,7 @@ workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t inp
     else if (nav->view == WORKOUT_VIEW_CODEX || nav->view == WORKOUT_VIEW_CODEX_DETAILS) {
         codex_navigate(nav, input);
     } else if (nav->view == WORKOUT_VIEW_AI) {
-        if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) {
-            nav->ai_provider ^= 1;
-            nav->ai_weekly = false;
-        }
-        if (input == WORKOUT_INPUT_OK) nav->ai_weekly = !nav->ai_weekly;
+        ai_navigate(nav, input);
     } else if (nav->view == WORKOUT_VIEW_SETUP) {
         if (input == WORKOUT_INPUT_CLEAR) nav->view = WORKOUT_VIEW_CLEAR;
         if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) nav->setup_step ^= 1;

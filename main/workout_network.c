@@ -38,6 +38,7 @@
 
 static const char *TAG = "workout_net";
 static QueueHandle_t s_commands, s_updates, s_quota_updates, s_codex_updates, s_codex_alerts;
+static QueueHandle_t s_tokens_updates;
 static EventGroupHandle_t s_events;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static workout_network_status_t s_status;
@@ -52,6 +53,9 @@ static workout_cache_t s_cache;
 static ai_quota_cache_t s_quota_cache[AI_QUOTA_PROVIDERS];
 static ai_quota_update_t s_quota;
 static int64_t s_next_quota[AI_QUOTA_PROVIDERS];
+static ai_tokens_cache_t s_tokens_cache[AI_QUOTA_PROVIDERS];
+static ai_tokens_update_t s_tokens;
+static int64_t s_next_tokens[AI_QUOTA_PROVIDERS];
 static codex_monitor_state_t s_codex;
 static codex_cursor_t s_codex_cursor;
 static int64_t s_next_codex_tasks, s_next_codex_alerts;
@@ -339,6 +343,10 @@ bool workout_network_take_quota(ai_quota_update_t *update) {
     return s_quota_updates && xQueueReceive(s_quota_updates, update, 0) == pdTRUE;
 }
 
+bool workout_network_take_tokens(ai_tokens_update_t *update) {
+    return s_tokens_updates && xQueueReceive(s_tokens_updates, update, 0) == pdTRUE;
+}
+
 bool workout_network_take_codex(codex_monitor_state_t *update) {
     return s_codex_updates && xQueueReceive(s_codex_updates, update, 0) == pdTRUE;
 }
@@ -376,6 +384,24 @@ static void quota_restore(void) {
         }
     }
     quota_publish();
+}
+
+static void tokens_publish(void) {
+    xQueueOverwrite(s_tokens_updates, &s_tokens);
+}
+
+static void tokens_restore(void) {
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        ai_tokens_cache_t *cache = &s_tokens_cache[i];
+        char url[WORKOUT_URL_SIZE];
+        bool source = !s_config.server[0] || (ai_tokens_url(s_config.server, i, url)
+            && cache->source == workout_checksum(url, strlen(url)));
+        if (cache->magic && source) {
+            s_tokens.providers[i] = (ai_tokens_state_t){.data = cache->data,
+                .available = true, .persisted = true, .from_cache = true};
+        }
+    }
+    tokens_publish();
 }
 
 static esp_err_t http_event(esp_http_client_event_t *event) {
@@ -465,6 +491,53 @@ static void sync_quota(unsigned provider) {
     heap_log("quota sync");
 }
 
+static void sync_tokens(unsigned provider) {
+    ai_tokens_state_t *state = &s_tokens.providers[provider];
+    if (!(xEventGroupGetBits(s_events) & CONNECTED_BIT)) {
+        s_next_tokens[provider] = now_ms() + RECONNECT_INTERVAL_MS;
+        return;
+    }
+    state->syncing = true;
+    tokens_publish();
+    char url[WORKOUT_URL_SIZE];
+    http_body_t body = {0};
+    int code = 0;
+    ai_tokens_data_t data = {0};
+    bool valid = ai_tokens_url(s_config.server, provider, url) && fetch_body(url, &body, &code, 8000)
+        && ai_tokens_decode_response(body.body, body.length, provider, &data)
+        && ai_tokens_newer(&s_tokens_cache[provider], &data, url);
+    free(body.body);
+    state->syncing = false;
+    state->failed = !valid;
+    state->http_status = code;
+    s_next_tokens[provider] = now_ms() + (valid ? QUOTA_SYNC_INTERVAL_MS : RECONNECT_INTERVAL_MS);
+    if (valid) {
+        ai_tokens_cache_t cache;
+        ai_tokens_cache_pack(&cache, &data, url, provider);
+        if (!state->persisted || memcmp(&cache, &s_tokens_cache[provider], sizeof(cache)) != 0)
+            state->persisted = workout_store_save_tokens(provider, &cache) == ESP_OK;
+        s_tokens_cache[provider] = cache;
+        state->data = data;
+        state->available = true;
+        state->from_cache = false;
+    }
+    tokens_publish();
+    heap_log("token sync");
+}
+
+static void tokens_source_changed(void) {
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        char url[WORKOUT_URL_SIZE];
+        if (s_tokens_cache[i].magic && (!ai_tokens_url(s_config.server, i, url)
+            || s_tokens_cache[i].source != workout_checksum(url, strlen(url)))) {
+            memset(&s_tokens_cache[i], 0, sizeof(s_tokens_cache[i]));
+            memset(&s_tokens.providers[i], 0, sizeof(s_tokens.providers[i]));
+        }
+        s_next_tokens[i] = 0;
+    }
+    tokens_publish();
+}
+
 static void quota_source_changed(void) {
     for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
         char url[WORKOUT_URL_SIZE];
@@ -476,6 +549,7 @@ static void quota_source_changed(void) {
         s_next_quota[i] = 0;
     }
     quota_publish();
+    tokens_source_changed();
 }
 
 static void sync_codex_tasks(void) {
@@ -549,10 +623,10 @@ static void sync_codex_alerts(void) {
 
 static void sync_due(int64_t now, bool connected) {
     /* Give monitoring two turns between slow legacy requests, without starving either group. */
-    int64_t due[] = {s_next_sync, s_next_quota[0], s_next_quota[1]};
+    int64_t due[] = {s_next_sync, s_next_quota[0], s_next_quota[1], s_next_tokens[0], s_next_tokens[1]};
     int legacy = -1;
-    for (unsigned i = 0; i < 3; i++) {
-        unsigned kind = (s_sync_turn + i) % 3;
+    for (unsigned i = 0; i < 5; i++) {
+        unsigned kind = (s_sync_turn + i) % 5;
         if (now >= due[kind]) { legacy = (int)kind; break; }
     }
     bool tasks = now >= s_next_codex_tasks, alerts = now >= s_next_codex_alerts;
@@ -565,10 +639,11 @@ static void sync_due(int64_t now, bool connected) {
         return;
     }
     if (legacy >= 0) {
-        s_sync_turn = ((unsigned)legacy + 1) % 3;
+        s_sync_turn = ((unsigned)legacy + 1) % 5;
         s_monitor_budget = 2;
         if (!legacy) sync_data();
-        else sync_quota((unsigned)legacy - 1);
+        else if (legacy < 3) sync_quota((unsigned)legacy - 1);
+        else sync_tokens((unsigned)legacy - 3);
     } else if (!connected) {
         if (tasks) s_next_codex_tasks = now + CODEX_RETRY_INTERVAL_MS;
         if (alerts) s_next_codex_alerts = now + CODEX_RETRY_INTERVAL_MS;
@@ -817,7 +892,7 @@ static void process_command(const network_command_t *command) {
     } else if (command->kind == WORKOUT_ACTION_SYNC) {
         if (s_config.ssid[0] && !s_pending_deadline) {
             s_next_sync = 0;
-            for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
+            for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = s_next_tokens[i] = 0;
             s_next_codex_tasks = s_next_codex_alerts = 0;
         }
     } else if (command->kind == WORKOUT_ACTION_CODEX_SYNC) {
@@ -849,7 +924,7 @@ static void network_tick(void) {
         xEventGroupClearBits(s_events, JUST_CONNECTED_BIT);
         start_clock();
         s_next_sync = 0;
-        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
+        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = s_next_tokens[i] = 0;
         s_next_codex_tasks = s_next_codex_alerts = 0;
         s_sync_turn = 0;
         s_monitor_budget = 0;
@@ -903,6 +978,7 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     s_commands = xQueueCreate(3, sizeof(network_command_t));
     s_updates = xQueueCreate(1, sizeof(workout_network_update_t));
     s_quota_updates = xQueueCreate(1, sizeof(ai_quota_update_t));
+    s_tokens_updates = xQueueCreate(1, sizeof(ai_tokens_update_t));
     s_codex_updates = xQueueCreate(1, sizeof(codex_monitor_state_t));
     s_codex_alerts = xQueueCreate(CODEX_ALERT_LIMIT, sizeof(codex_alert_t));
     memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
@@ -910,21 +986,27 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     s_sync_turn = 0;
     s_monitor_budget = 0;
     s_monitor_alert_turn = false;
-    bool queues = s_events && s_commands && s_updates && s_quota_updates && s_codex_updates && s_codex_alerts;
+    bool queues = s_events && s_commands && s_updates && s_quota_updates && s_tokens_updates
+        && s_codex_updates && s_codex_alerts;
     if (queues) {
-        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++)
+        for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
             (void)workout_store_load_quota(i, &s_quota_cache[i]);
+            (void)workout_store_load_tokens(i, &s_tokens_cache[i]);
+        }
         quota_restore();
+        tokens_restore();
     }
     if (queues && xTaskCreate(network_task, "workout_net", 7168, NULL, 4, NULL) == pdPASS) return ESP_OK;
     if (s_events) vEventGroupDelete(s_events);
     if (s_commands) vQueueDelete(s_commands);
     if (s_updates) vQueueDelete(s_updates);
     if (s_quota_updates) vQueueDelete(s_quota_updates);
+    if (s_tokens_updates) vQueueDelete(s_tokens_updates);
     if (s_codex_updates) vQueueDelete(s_codex_updates);
     if (s_codex_alerts) vQueueDelete(s_codex_alerts);
     s_commands = s_updates = NULL;
     s_quota_updates = NULL;
+    s_tokens_updates = NULL;
     s_codex_updates = s_codex_alerts = NULL;
     s_events = NULL;
     network_error(WORKOUT_NET_INIT, 0);

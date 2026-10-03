@@ -18,7 +18,8 @@ the firmware palette.
 | Home | Select calendar, Codex quota or GLM quota | Open month calendar or selected quota | Page menu |
 | Month calendar / almanac | Previous / next day | Switch calendar / almanac | Page menu |
 | Workout dashboard / details | Switch week and month | Open / close details | Page menu |
-| AI usage | Switch Codex / GLM; return to five hours | Switch five hours / seven days | Page menu |
+| AI quota pages | Switch Codex / GLM; return to five hours | Cycle five hours, seven days, Token heatmap | Page menu |
+| Token heatmap | Previous / next date, wrapping within 30 days | Return to five-hour quota | Page menu |
 | Page menu | Select an entry | Enter the selected page | Home |
 | Network and interface | Select Wi-Fi, server or add configuration | Open selection/setup | Page menu |
 | Wi-Fi / server list | Select a saved entry; three rows per page | Switch selection; an empty list opens setup | Network and interface |
@@ -191,26 +192,49 @@ Unicode-code fallback. See the [font assets](../../assets/README.md).
 
 ## AI usage
 
-The focused page shows remaining and used quota, a 20-block remaining-quota meter,
-reset time with its API time-zone offset, and the last successful fetch time.
-Up/Down switches Codex/GLM; OK switches five hours/seven days. Enter AI usage
+The quota-first page shows remaining and used quota, a 20-block remaining-quota meter,
+reset time with its API time-zone offset, and separate quota/Token fetch times.
+Five-hour quota includes today's cumulative Tokens; seven-day quota includes the
+last 30 natural days, including today. These are independent statistics, not
+Tokens consumed within five hours or seven days. The long quota remains seven
+days: no monthly quota or rolling 24-hour Token statistic is inferred.
+Up/Down switches Codex/GLM; OK cycles five hours, seven days and the Token heatmap. Enter AI usage
 from its home summary or the menu. No computer-resource page
 or `/api/system` request is included.
 
 The existing stored `/api/workout` URL remains unchanged. Replace only that suffix
-with `/api/codex/quota` or `/api/glm/quota`, preserving scheme, host, port and any
+with `/api/codex/quota`, `/api/glm/quota`, `/api/codex/tokens` or `/api/glm/tokens`, preserving scheme, host, port and any
 reverse-proxy prefix. No new Wi-Fi setup or provider credential is needed on the
 device; provider credentials remain managed by the backend.
 
-Providers refresh independently every minute on all pages, retry failures after 30 seconds,
+Quota and Token endpoints refresh independently every minute on all pages, retry failures after 30 seconds,
 and run one request per worker tick to handle configuration commands between requests.
 Workout refreshes every five minutes. Startup/reconnection and manual sync fetch both
-workout and quota data immediately; request duration can delay the next refresh slightly.
+workout, quota and Token data immediately; request duration can delay the next refresh slightly.
 One failed provider/workout request does not stop the others. Missing windows show
 `--`; an available zero means exhausted. Unknown reset times are labeled unavailable.
 Plan names outside the printable ASCII subset are omitted without rejecting the data.
 
-Each provider has a versioned, source-bound, CRC-checked NVS blob (`codex`, `glm`).
+The heatmap shows a Monday-first calendar grid for the backend's 30-day window,
+using up to six rows across month/year boundaries. Colors use shared thresholds:
+zero, below 200K, below 500K, below 1M, and at least 1M. Missing days have diagonal
+marks and an explicit unknown label when selected; a known zero remains zero.
+Up/Down selects a date, whose usage is shown below the grid in K, M or 100-million units; the latest
+two date buckets remain visible below it. Headline/recent amounts use K, M and
+100-million units, rounded to at most two decimals with promotion at boundaries;
+exceptionally large recent amounts use whole 100-million units and, if needed,
+day-of-month labels to fit. The window and selected date retain their month labels.
+The Codex source retains its original date buckets and reports an unspecified
+statistics timezone; GLM uses Asia/Shanghai. Today is the window's final bucket,
+not a sliding 24 hours. A synchronized device clock suppresses yesterday's
+cached amount after midnight until a new window arrives. Before clock sync,
+retained daily data is labeled recent rather than today. Partial totals show
+the known-day count and an incomplete-data notice; all-unknown totals show `--`.
+Token failures retain quota independently and mark retained Token data old.
+
+Each provider has versioned, source-bound, CRC-checked NVS blobs (`codex`, `glm`,
+`codex_tokens`, `glm_tokens`). Token blobs use separate keys; existing quota,
+workout and network data formats and the partition layout are unchanged.
 Invalid or older responses retain its last valid data. Offline/restarted devices keep
 snapshots indefinitely and show old data. Failed commits keep the displayed data and
 retry storage on a later successful fetch; unchanged snapshots are not rewritten.
@@ -230,9 +254,9 @@ that exceeds four detail lines scrolls in full. Boot opens the clock/calendar ho
 
 The saved workout URL derives `/api/codex/tasks` and `/api/codex/alerts`, preserving
 its origin and reverse-proxy prefix. Both poll every five seconds with a three-second
-HTTP timeout, independently of workout/quota results. All five endpoints share the
+HTTP timeout, independently of workout/quota/Token results. All seven endpoints share the
 existing worker, with one request per tick, two monitoring turns between legacy
-requests and round-robin scheduling within each group to prevent starvation.
+requests (including Token queries) and round-robin scheduling within each group to prevent starvation.
 Slow requests and HTTPS clock synchronization can delay polling; the
 end-to-end latency needs measurement on the device. A missing monitor endpoint
 retries after 30 seconds; other failures retry after ten seconds. OK on a failed

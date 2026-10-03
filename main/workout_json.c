@@ -183,6 +183,69 @@ bool ai_quota_decode_response(const char *json, size_t length, unsigned provider
     return valid;
 }
 
+static bool token_number(const cJSON *item, uint64_t *output) {
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) || item->valuedouble < 0
+        || item->valuedouble > (double)AI_TOKENS_LIMIT || floor(item->valuedouble) != item->valuedouble)
+        return false;
+    *output = (uint64_t)item->valuedouble;
+    return true;
+}
+
+static bool token_days(const cJSON *data, ai_tokens_data_t *result) {
+    const cJSON *days = cJSON_GetObjectItemCaseSensitive(data, "daily_usage");
+    if (!cJSON_IsArray(days) || cJSON_GetArraySize(days) != AI_TOKENS_DAYS) return false;
+    for (unsigned i = 0; i < AI_TOKENS_DAYS; i++) {
+        const cJSON *bucket = cJSON_GetArrayItem(days, (int)i);
+        char date[11];
+        int64_t day;
+        if (!unique_object(bucket) || !string(bucket, "date", date, sizeof(date)) || strlen(date) != 10
+            || !workout_parse_date(date, &day) || day != result->start_day + i) return false;
+        const cJSON *tokens = cJSON_GetObjectItemCaseSensitive(bucket, "tokens");
+        if (cJSON_IsNull(tokens)) continue;
+        if (!token_number(tokens, &result->daily[i])) return false;
+        result->known |= UINT32_C(1) << i;
+    }
+    return true;
+}
+
+static bool token_data(const cJSON *root, unsigned provider, ai_tokens_data_t *result) {
+    if (provider >= AI_QUOTA_PROVIDERS || !unique_object(root)
+        || !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "success"))) return false;
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    char source[24];
+    int64_t day;
+    if (!unique_object(data) || !string(data, "source", source, sizeof(source))
+        || strcmp(source, provider ? "glm_model_usage" : "codex_app_server") != 0
+        || !string(data, "start_date", result->start_date, sizeof(result->start_date))
+        || !workout_parse_date(result->start_date, &day)) return false;
+    result->start_day = (int32_t)day;
+    const cJSON *timezone = cJSON_GetObjectItemCaseSensitive(data, "timezone");
+    result->timezone_known = cJSON_IsString(timezone) && strcmp(timezone->valuestring, "Asia/Shanghai") == 0;
+    if (!result->timezone_known && (!cJSON_IsNull(timezone) || provider)) return false;
+    const cJSON *stale = cJSON_GetObjectItemCaseSensitive(data, "stale");
+    if (!cJSON_IsBool(stale)) return false;
+    result->stale = cJSON_IsTrue(stale);
+    uint32_t count;
+    if (!string(data, "end_date", result->end_date, sizeof(result->end_date))
+        || !string(data, "fetched_at", result->fetched_at, sizeof(result->fetched_at))
+        || !workout_parse_timestamp(result->fetched_at, &result->fetched_seconds)
+        || !number(data, "available_days", 1, AI_TOKENS_DAYS, &count) || !token_days(data, result)) return false;
+    result->available_days = count;
+    const cJSON *total = cJSON_GetObjectItemCaseSensitive(data, "total_tokens");
+    if (count ? !token_number(total, &result->total) : !cJSON_IsNull(total)) return false;
+    return ai_tokens_data_valid(result);
+}
+
+bool ai_tokens_decode_response(const char *json, size_t length, unsigned provider, ai_tokens_data_t *data) {
+    cJSON *root = bounded_json(json, length, 512);
+    if (!root) return false;
+    ai_tokens_data_t result = {0};
+    bool valid = token_data(root, provider, &result);
+    cJSON_Delete(root);
+    if (valid) *data = result;
+    return valid;
+}
+
 bool workout_decode_config(const char *json, size_t length, workout_config_t *config,
                            char token[33]) {
     cJSON *root = bounded_json(json, length, 192);

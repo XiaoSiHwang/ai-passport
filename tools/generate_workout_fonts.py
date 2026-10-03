@@ -25,7 +25,7 @@ DIGITS = [
 
 def symbols() -> str:
     text = "".join((ROOT / "main" / name).read_text(encoding="utf-8")
-                   for name in ("workout_ui.c", "passport_calendar.c", "passport_calendar_data.inc"))
+                   for name in ("workout_ui.c", "ai_tokens.c", "passport_calendar.c", "passport_calendar_data.inc"))
     chinese = {char for char in text if ord(char) > 126 and char.isprintable()}
     return "".join(chr(value) for value in range(32, 127)) + "".join(sorted(chinese))
 

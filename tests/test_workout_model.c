@@ -112,6 +112,14 @@ static void navigation(void) {
     assert(nav.ai_provider == 1 && !nav.ai_weekly);
     workout_navigate(&nav, WORKOUT_INPUT_OK);
     assert(nav.ai_weekly);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.ai_heatmap && nav.ai_day == 29 && nav.ai_provider == 1);
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    assert(nav.ai_day == 0 && nav.ai_provider == 1);
+    workout_navigate(&nav, WORKOUT_INPUT_UP);
+    assert(nav.ai_day == 29);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(!nav.ai_heatmap && !nav.ai_weekly);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     assert(nav.ai_provider == 0 && !nav.ai_weekly);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);

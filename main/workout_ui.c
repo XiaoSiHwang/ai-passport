@@ -5,6 +5,7 @@
 #include "workout_font_inventory.h"
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 
 LV_FONT_DECLARE(workout_font_12);
 LV_FONT_DECLARE(workout_font_16);
@@ -70,6 +71,31 @@ static bool cached(void) {
         || s_state.network.error != WORKOUT_NET_OK;
 }
 
+static bool tokens_old(const ai_tokens_state_t *tokens) {
+    return tokens->from_cache || tokens->failed || tokens->data.stale || !s_state.network.online
+        || (s_state.clock.valid && !ai_tokens_current(&tokens->data, s_state.clock.day));
+}
+
+static const char *ai_network_label(void) {
+    unsigned provider = s_state.navigation.ai_provider;
+    const ai_quota_state_t *quota = &s_state.quota.providers[provider];
+    const ai_tokens_state_t *tokens = &s_state.tokens.providers[provider];
+    if (!s_state.network.online) return "离线";
+    if (quota->syncing || tokens->syncing) return "同步中";
+    if (s_state.navigation.ai_heatmap) {
+        if (!tokens->available) return tokens->failed ? "Token 异常" : "等待同步";
+        if (!tokens->persisted) return "缓存失败";
+        return tokens_old(tokens) ? "旧数据" : "Wi-Fi";
+    }
+    if (!quota->available) return quota->failed ? "额度异常" : "等待同步";
+    if (quota->available && !quota->persisted) return "缓存失败";
+    if (quota->from_cache || quota->failed || quota->data.stale
+        || (tokens->available && tokens_old(tokens))) return "旧数据";
+    if (tokens->failed) return "Token 异常";
+    if (tokens->available && !tokens->persisted) return "缓存失败";
+    return "Wi-Fi";
+}
+
 static const char *network_label(void) {
     if (s_state.network.setup_active) return "配网";
     if (s_state.network.profile_busy) return "切换中";
@@ -92,13 +118,7 @@ static const char *network_label(void) {
         return "Wi-Fi";
     }
     if (s_state.navigation.view == WORKOUT_VIEW_AI) {
-        const ai_quota_state_t *quota = &s_state.quota.providers[s_state.navigation.ai_provider];
-        if (!s_state.network.online) return "离线";
-        if (quota->syncing) return "同步中";
-        if (!quota->available) return quota->failed ? "接口错误" : "等待同步";
-        if (quota->available && !quota->persisted) return "缓存失败";
-        if (quota->from_cache || quota->failed || quota->data.stale) return "旧数据";
-        return "Wi-Fi";
+        return ai_network_label();
     }
     if (s_state.network.setup_active) return "配网";
     if (s_state.network.syncing) return "同步中";
@@ -237,34 +257,58 @@ static void menu(lv_layer_t *layer) {
 }
 
 static void quota_reset(lv_layer_t *layer, const ai_quota_window_t *window) {
-    small(layer, "重置时间", 20, 231, 100);
-    if (!window->reset_at[0]) { small(layer, "暂不可用", 141, 231, 79); return; }
+    small(layer, "重置", 20, 255, 30);
+    if (!window->reset_at[0]) { small(layer, "暂不可用", 56, 255, 164); return; }
     const char *stamp = window->reset_at;
     char value[32];
-    snprintf(value, sizeof(value), "%.2s/%.2s %.5s", stamp + 5, stamp + 8, stamp + 11);
-    small(layer, value, 121, 231, 100);
     size_t length = strlen(stamp);
-    snprintf(value, sizeof(value), "接口时区 UTC%s", stamp[length - 1] == 'Z' ? "+00:00" : stamp + length - 6);
-    small(layer, value, 20, 250, 200);
+    snprintf(value, sizeof(value), "%.2s/%.2s %.5s %s", stamp + 5, stamp + 8, stamp + 11,
+             stamp[length - 1] == 'Z' ? "+00:00" : stamp + length - 6);
+    small(layer, value, 56, 255, 164);
 }
 
 static void quota_timestamp(lv_layer_t *layer, const ai_quota_state_t *quota) {
-    bool old = quota->from_cache || quota->failed || quota->data.stale || !s_state.network.online;
-    const char *stamp = quota->data.fetched_at;
+    const ai_tokens_state_t *tokens = &s_state.tokens.providers[s_state.navigation.ai_provider];
     char value[48];
-    snprintf(value, sizeof(value), "%s %.2s/%.2s %.5s", old ? "上次同步" : "同步", stamp + 5, stamp + 8, stamp + 11);
-    small(layer, value, 20, 270, 200);
+    snprintf(value, sizeof(value), "额度 %s%.5s · Token %s%.5s",
+             quota->available ? "" : "--", quota->available ? quota->data.fetched_at + 11 : "",
+             tokens->available ? "" : "--", tokens->available ? tokens->data.fetched_at + 11 : "");
+    small(layer, value, 20, 274, 200);
 }
 
-static void quota_empty(lv_layer_t *layer, const ai_quota_state_t *quota) {
-    label(layer, "额度暂不可用", 30, 133, 190, &workout_font_20, UI_INK);
-    small(layer, "未知额度显示为 --", 30, 177, 180);
-    if (!s_state.network.has_config) small(layer, "长按确定，进入网络配置", 30, 200, 190);
-    else if (quota->http_status && quota->http_status != 200) {
-        char value[40];
-        snprintf(value, sizeof(value), "接口错误 HTTP %d", quota->http_status);
-        small(layer, value, 30, 200, 185);
-    } else small(layer, "可在菜单中重新同步", 30, 200, 190);
+static void token_value(lv_layer_t *layer, const char *value, int x, int y, int width,
+                        const lv_font_t *font) {
+    lv_point_t extent;
+    lv_text_get_size(&extent, value, font, 0, 0, 1000, LV_TEXT_FLAG_NONE);
+    if (extent.x > width) font = &workout_font_16;
+    lv_text_get_size(&extent, value, font, 0, 0, 1000, LV_TEXT_FLAG_NONE);
+    if (extent.x > width) font = &workout_font_12;
+    lv_text_get_size(&extent, value, font, 0, 0, 1000, LV_TEXT_FLAG_NONE);
+    label(layer, value, x + width - extent.x, y, extent.x, font, UI_INK);
+}
+
+static void quota_tokens(lv_layer_t *layer) {
+    const ai_tokens_state_t *tokens = &s_state.tokens.providers[s_state.navigation.ai_provider];
+    const ai_tokens_data_t *data = &tokens->data;
+    bool weekly = s_state.navigation.ai_weekly;
+    bool current = !s_state.clock.valid || ai_tokens_current(data, s_state.clock.day);
+    bool known = tokens->available && (weekly ? data->available_days != 0
+        : current && ai_tokens_known(data, AI_TOKENS_DAYS - 1));
+    rectangle(layer, 20, 205, 200, 1, UI_TRACK);
+    small(layer, weekly ? "近30天 Token" : tokens->from_cache && !s_state.clock.valid
+        ? "最近 Token" : "今日 Token", 20, 215, 90);
+    char value[80];
+    ai_tokens_format(weekly ? data->total : data->daily[AI_TOKENS_DAYS - 1], known, value);
+    token_value(layer, value, 111, 211, 109, &workout_font_20);
+    if (!tokens->available) strcpy(value, tokens->failed ? "Token 暂不可用 · 可重新同步" : "Token 等待同步");
+    else if (!weekly && !current) snprintf(value, sizeof(value), "等待今日数据 · 上次 %.2s/%.2s", data->end_date + 5, data->end_date + 8);
+    else if (weekly && data->available_days < AI_TOKENS_DAYS)
+        snprintf(value, sizeof(value), "已知 %u/30 天 · 合计不完整", data->available_days);
+    else if (weekly) snprintf(value, sizeof(value), "%.2s/%.2s-%.2s/%.2s · 完整30天",
+        data->start_date + 5, data->start_date + 8, data->end_date + 5, data->end_date + 8);
+    else snprintf(value, sizeof(value), "%.2s/%.2s · %s", data->end_date + 5, data->end_date + 8,
+        !known ? "当日记录缺失" : data->timezone_known ? "当日持续累计" : "来源时区未明");
+    small(layer, value, 20, 237, 200);
 }
 
 static void quota_page(lv_layer_t *layer) {
@@ -274,24 +318,117 @@ static void quota_page(lv_layer_t *layer) {
     title(layer, provider ? "GLM" : "Codex");
     small(layer, provider && quota->data.level[0] ? quota->data.level : "额度详情", 106, 40, 114);
     small(layer, s_state.navigation.ai_weekly ? "7天额度" : "5小时额度", 20, 64, 200);
-    hint(layer, "上下 换平台  确定 周期");
-    if (!quota->available) { quota_empty(layer, quota); return; }
-    rectangle(layer, 20, 89, 200, 83, UI_PANEL);
-    small(layer, "剩余额度", 30, 99, 170);
+    hint(layer, "上下 换平台  确定 下一页");
+    rectangle(layer, 20, 85, 200, 78, UI_PANEL);
+    small(layer, "剩余额度", 30, 95, 170);
     char value[32];
-    if (!window->available) strcpy(value, "--");
+    bool available = quota->available && window->available;
+    if (!available) strcpy(value, "--");
     else if (window->remaining % 10) snprintf(value, sizeof(value), "%u.%u", window->remaining / 10, window->remaining % 10);
     else snprintf(value, sizeof(value), "%u", window->remaining / 10);
-    label(layer, value, 30, 121, 153, window->available ? &workout_digits_35 : &workout_font_20, UI_INK);
-    if (window->available) small(layer, "%", 188, 148, 30);
-    if (!window->available) strcpy(value, "该周期暂不可用");
+    label(layer, value, 30, 117, 153, available ? &workout_digits_35 : &workout_font_20, UI_INK);
+    if (available) small(layer, "%", 188, 140, 30);
+    if (!available) strcpy(value, "该周期暂不可用");
     else if (!window->remaining) strcpy(value, "额度已用尽");
     else snprintf(value, sizeof(value), "已使用 %u.%u%%", (1000 - window->remaining) / 10, (1000 - window->remaining) % 10);
-    small(layer, value, 20, 182, 200);
-    unsigned filled = window->available ? workout_progress(window->remaining, 1000, 20) : 0;
-    for (unsigned i = 0; i < 20; i++) rectangle(layer, 20 + (int)i * 10, 205, 8, 9, i < filled ? UI_ACCENT : UI_TRACK);
+    small(layer, value, 20, 173, 200);
+    unsigned filled = available ? workout_progress(window->remaining, 1000, 20) : 0;
+    for (unsigned i = 0; i < 20; i++) rectangle(layer, 20 + (int)i * 10, 193, 8, 6, i < filled ? UI_ACCENT : UI_TRACK);
+    quota_tokens(layer);
     quota_reset(layer, window);
     quota_timestamp(layer, quota);
+}
+
+static void token_unknown(lv_layer_t *layer, int x, int y) {
+    for (int offset = -10; offset < 24; offset += 6) {
+        lv_draw_line_dsc_t descriptor;
+        lv_draw_line_dsc_init(&descriptor);
+        descriptor.color = lv_color_hex(UI_TRACK);
+        descriptor.width = 2;
+        descriptor.p1 = (lv_point_precise_t){x + (offset < 0 ? 0 : offset), y + (offset < 0 ? -offset : 0)};
+        descriptor.p2 = (lv_point_precise_t){x + (offset + 13 > 23 ? 23 : offset + 13),
+            y + (offset + 13 > 23 ? 23 - offset : 13)};
+        lv_draw_line(layer, &descriptor);
+    }
+}
+
+static void token_cells(lv_layer_t *layer, const ai_tokens_data_t *data) {
+    static const uint32_t colors[] = {UI_TRACK, 0xC4D6B8, 0x92B27A, 0x557945, 0x244A32};
+    static const char *weekdays[] = {"一", "二", "三", "四", "五", "六", "日"};
+    for (unsigned i = 0; i < 7; i++) small(layer, weekdays[i], 27 + (int)i * 28, 107, 24);
+    for (unsigned i = 0; i < AI_TOKENS_DAYS; i++) {
+        unsigned cell = ai_tokens_cell(data, i), level = ai_tokens_level(data->daily[i]);
+        int x = 20 + (int)(cell % 7) * 28, y = 125 + (int)(cell / 7) * 17;
+        bool known = ai_tokens_known(data, i), selected = i == s_state.navigation.ai_day;
+        if (selected) rectangle(layer, x - 2, y - 2, 28, 18, UI_INK);
+        rectangle(layer, x, y, 24, 14, known ? colors[level] : UI_BACKGROUND);
+        if (!known) token_unknown(layer, x, y);
+        char date[11];
+        ai_tokens_date(data, i, date);
+        label(layer, date + 8, x + 4, y, 20, &workout_font_12, known && level >= 3 ? UI_BACKGROUND : UI_INK);
+    }
+    small(layer, "0", 20, 230, 20);
+    for (unsigned i = 0; i < 5; i++) rectangle(layer, 39 + (int)i * 12, 233, 10, 8, colors[i]);
+    small(layer, ">=1M", 105, 230, 45);
+    small(layer, "/ 未知", 169, 230, 51);
+}
+
+static void token_recent(lv_layer_t *layer, const ai_tokens_data_t *data) {
+    char date[11], value[32], detail[64];
+    unsigned selected = s_state.navigation.ai_day < AI_TOKENS_DAYS ? s_state.navigation.ai_day : AI_TOKENS_DAYS - 1;
+    ai_tokens_date(data, selected, date);
+    snprintf(detail, sizeof(detail), "%.2s/%.2s", date + 5, date + 8);
+    small(layer, detail, 20, 251, 72);
+    if (ai_tokens_known(data, selected)) ai_tokens_format(data->daily[selected], true, value);
+    else strcpy(value, "未知");
+    token_value(layer, value, 90, 248, 130, &workout_font_16);
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned index = AI_TOKENS_DAYS - 1 - i;
+        ai_tokens_date(data, index, date);
+        ai_tokens_format(data->daily[index], ai_tokens_known(data, index), value);
+        snprintf(detail, sizeof(detail), "%.2s/%.2s %s", date + 5, date + 8, value);
+        lv_point_t extent;
+        lv_text_get_size(&extent, detail, &workout_font_12, 0, 0, 1000, LV_TEXT_FLAG_NONE);
+        /* Keep both dates visible when large values require compact rounding. */
+        if (extent.x > 98) {
+            snprintf(value, sizeof(value), "%" PRIu64 "亿",
+                (data->daily[index] + UINT64_C(50000000)) / UINT64_C(100000000));
+            snprintf(detail, sizeof(detail), "%.2s/%.2s %s", date + 5, date + 8, value);
+            lv_text_get_size(&extent, detail, &workout_font_12, 0, 0, 1000, LV_TEXT_FLAG_NONE);
+            if (extent.x > 98) snprintf(detail, sizeof(detail), "%.2s日 %s", date + 8, value);
+        }
+        token_value(layer, detail, 20 + (int)i * 102, 274, 98, &workout_font_12);
+    }
+}
+
+static void token_heatmap(lv_layer_t *layer) {
+    unsigned provider = s_state.navigation.ai_provider;
+    const ai_tokens_state_t *tokens = &s_state.tokens.providers[provider];
+    const ai_tokens_data_t *data = &tokens->data;
+    title(layer, provider ? "GLM" : "Codex");
+    small(layer, "Token 热力图", 125, 40, 95);
+    hint(layer, "上下 查日期  确定 回额度");
+    if (!tokens->available) {
+        label(layer, "Token 暂不可用", 30, 133, 180, &workout_font_20, UI_INK);
+        small(layer, tokens->syncing ? "正在同步" : "可在菜单中重新同步", 30, 177, 180);
+        if (tokens->http_status) {
+            char error[32];
+            snprintf(error, sizeof(error), "接口 HTTP %d", tokens->http_status);
+            small(layer, error, 30, 200, 180);
+        }
+        return;
+    }
+    char value[64];
+    snprintf(value, sizeof(value), "近30天 %.2s/%.2s-%.2s/%.2s", data->start_date + 5,
+        data->start_date + 8, data->end_date + 5, data->end_date + 8);
+    small(layer, value, 20, 64, 200);
+    if (data->available_days < AI_TOKENS_DAYS) snprintf(value, sizeof(value), "已知 %u/30天", data->available_days);
+    else strcpy(value, "累计 Token");
+    small(layer, value, 20, 86, 100);
+    ai_tokens_format(data->total, data->available_days != 0, value);
+    token_value(layer, value, 112, 81, 108, &workout_font_20);
+    token_cells(layer, data);
+    token_recent(layer, data);
 }
 
 static const codex_task_t *codex_task(void) {
@@ -838,7 +975,10 @@ static void draw(lv_event_t *event) {
         case WORKOUT_VIEW_SETUP: setup(layer); break;
         case WORKOUT_VIEW_WIFI: case WORKOUT_VIEW_SERVER: profiles(layer); break;
         case WORKOUT_VIEW_CONNECTION: connection(layer); break;
-        case WORKOUT_VIEW_AI: quota_page(layer); break;
+        case WORKOUT_VIEW_AI:
+            if (s_state.navigation.ai_heatmap) token_heatmap(layer);
+            else quota_page(layer);
+            break;
         case WORKOUT_VIEW_CODEX: codex_page(layer); break;
         case WORKOUT_VIEW_CODEX_DETAILS: codex_details(layer); break;
         case WORKOUT_VIEW_CLEAR:

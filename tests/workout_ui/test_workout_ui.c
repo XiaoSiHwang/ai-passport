@@ -75,6 +75,61 @@ static void quota_screens(workout_ui_state_t *state) {
     workout_ui_update(state); screenshot("quota-unavailable.ppm");
 }
 
+static void token_screens(workout_ui_state_t *state) {
+    state->navigation = (workout_navigation_t){.view = WORKOUT_VIEW_AI, .ai_day = 29};
+    state->network.online = true; state->network.setup_active = false; state->clock.valid = false;
+    for (unsigned provider = 0; provider < AI_QUOTA_PROVIDERS; provider++) {
+        ai_tokens_state_t *tokens = &state->tokens.providers[provider];
+        *tokens = (ai_tokens_state_t){.available = true, .persisted = true};
+        ai_tokens_data_t *data = &tokens->data;
+        strcpy(data->start_date, "2026-09-04"); strcpy(data->end_date, "2026-10-03");
+        strcpy(data->fetched_at, "2026-10-03T14:33:00+08:00");
+        int64_t day;
+        assert(workout_parse_date(data->start_date, &day)); data->start_day = (int32_t)day;
+        assert(workout_parse_timestamp(data->fetched_at, &data->fetched_seconds));
+        for (unsigned i = 0; i < AI_TOKENS_DAYS; i++) {
+            if (i < 6) continue;
+            data->known |= UINT32_C(1) << i; data->available_days++;
+            data->daily[i] = i == 6 ? 0 : (i * 174721) % 1450000;
+            data->total += data->daily[i];
+        }
+        data->timezone_known = provider == 1;
+        assert(ai_tokens_data_valid(data));
+    }
+    workout_ui_update(state); screenshot("token-today.ppm");
+    state->navigation.ai_weekly = true;
+    workout_ui_update(state); screenshot("token-month.ppm");
+    state->navigation.ai_heatmap = true;
+    workout_ui_update(state); screenshot("token-heatmap.ppm");
+    state->navigation.ai_day = 0;
+    workout_ui_update(state); screenshot("token-heatmap-missing.ppm");
+    ai_tokens_data_t *data = &state->tokens.providers[0].data;
+    strcpy(data->start_date, "2026-12-20"); strcpy(data->end_date, "2027-01-18");
+    int64_t day;
+    assert(workout_parse_date(data->start_date, &day)); data->start_day = (int32_t)day;
+    state->navigation.ai_day = 29;
+    workout_ui_update(state); screenshot("token-heatmap-six-rows.ppm");
+    memset(data->daily, 0, sizeof(data->daily)); data->known = 0; data->available_days = 0; data->total = 0;
+    workout_ui_update(state); screenshot("token-heatmap-all-unknown.ppm");
+    data->known = UINT32_C(1) << 29; data->available_days = 1;
+    data->daily[29] = data->total = AI_TOKENS_LIMIT;
+    workout_ui_update(state); screenshot("token-heatmap-large.ppm");
+    data->daily[29] = data->total = UINT64_C(9999999000000);
+    workout_ui_update(state); screenshot("token-heatmap-large-rounded.ppm");
+    state->tokens.providers[0].failed = true; state->network.online = false;
+    workout_ui_update(state); screenshot("token-heatmap-offline.ppm");
+    state->navigation.ai_heatmap = state->navigation.ai_weekly = false;
+    state->clock.valid = true; state->clock.day = data->start_day + 30;
+    workout_ui_update(state); screenshot("token-after-midnight.ppm");
+    state->clock.valid = false;
+    state->tokens.providers[0].available = false; state->tokens.providers[0].http_status = 503;
+    state->network.online = true;
+    workout_ui_update(state); screenshot("token-missing-quota-retained.ppm");
+    state->navigation.ai_heatmap = true;
+    workout_ui_update(state); screenshot("token-unavailable.ppm");
+    state->navigation.ai_heatmap = false;
+}
+
 static void calendar_time(workout_ui_state_t *state, const char *timestamp) {
     int64_t seconds;
     assert(workout_parse_timestamp(timestamp, &seconds));
@@ -319,6 +374,7 @@ int main(void) {
     state.navigation.view = WORKOUT_VIEW_DASHBOARD; state.has_data = false;
     workout_ui_update(&state); screenshot("empty.ppm");
     quota_screens(&state);
+    token_screens(&state);
     connectivity_screens(&state);
     codex_screens(&state);
     lv_mem_monitor_t before, after;

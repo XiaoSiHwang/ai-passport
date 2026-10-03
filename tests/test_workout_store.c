@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-static unsigned char s_values[5][2048], s_pending[5][2048];
-static size_t s_sizes[5], s_pending_sizes[5];
+static unsigned char s_values[7][2048], s_pending[7][2048];
+static size_t s_sizes[7], s_pending_sizes[7];
 static bool s_fail_commit;
 static unsigned s_open, s_close;
 
@@ -14,6 +14,8 @@ static unsigned slot(const char *key) {
     if (strcmp(key, "snapshot") == 0) return 1;
     if (strcmp(key, "codex") == 0) return 2;
     if (strcmp(key, "profiles") == 0) return 4;
+    if (strcmp(key, "codex_tokens") == 0) return 5;
+    if (strcmp(key, "glm_tokens") == 0) return 6;
     assert(strcmp(key, "glm") == 0);
     return 3;
 }
@@ -108,6 +110,33 @@ static void quota_storage(void) {
     assert(workout_store_load_quota(1, &restored) == ESP_ERR_INVALID_CRC && restored.magic == 0);
 }
 
+static void token_storage(void) {
+    ai_tokens_data_t data = {.known = UINT32_C(1) << 29, .available_days = 1};
+    strcpy(data.start_date, "2026-09-04"); strcpy(data.end_date, "2026-10-03");
+    strcpy(data.fetched_at, "2026-10-03T12:00:00+08:00");
+    int64_t day;
+    assert(workout_parse_date(data.start_date, &day)); data.start_day = (int32_t)day;
+    assert(workout_parse_timestamp(data.fetched_at, &data.fetched_seconds));
+    ai_tokens_cache_t first, second, restored;
+    ai_tokens_cache_pack(&first, &data, "http://example.com/api/codex/tokens", 0);
+    assert(workout_store_save_tokens(0, &first) == ESP_OK);
+    data.daily[29] = data.total = 5000000000;
+    ai_tokens_cache_pack(&second, &data, "http://example.com/api/codex/tokens", 0);
+    s_fail_commit = true;
+    assert(workout_store_save_tokens(0, &second) == ESP_FAIL);
+    assert(workout_store_load_tokens(0, &restored) == ESP_OK && memcmp(&first, &restored, sizeof(first)) == 0);
+    s_fail_commit = false;
+    assert(workout_store_save_tokens(0, &second) == ESP_OK);
+    ai_tokens_cache_pack(&first, &data, "http://example.com/api/glm/tokens", 1);
+    assert(workout_store_save_tokens(1, &first) == ESP_OK);
+    assert(workout_store_clear_config() == ESP_OK);
+    assert(workout_store_load_tokens(0, &restored) == ESP_OK && memcmp(&second, &restored, sizeof(second)) == 0);
+    assert(workout_store_load_tokens(1, &restored) == ESP_OK && memcmp(&first, &restored, sizeof(first)) == 0);
+    assert(workout_store_save_tokens(0, &first) == ESP_ERR_INVALID_ARG);
+    s_values[6][30] ^= 1;
+    assert(workout_store_load_tokens(1, &restored) == ESP_ERR_INVALID_CRC && !restored.magic);
+}
+
 static void workout_storage(void) {
     workout_config_t config = {.ssid = "Example", .server = "http://example.com/api/workout"}, loaded;
     assert(workout_store_init() == ESP_OK);
@@ -132,7 +161,7 @@ static void workout_storage(void) {
 }
 
 int main(void) {
-    workout_storage(); quota_storage(); profile_storage();
+    workout_storage(); quota_storage(); token_storage(); profile_storage();
     assert(s_open == s_close);
     puts("Workout storage: PASS");
     return 0;
