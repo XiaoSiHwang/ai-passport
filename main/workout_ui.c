@@ -96,6 +96,13 @@ static const char *ai_network_label(void) {
     return "Wi-Fi";
 }
 
+static bool wellness_old(void) {
+    const wellness_state_t *state = &s_state.wellness;
+    return state->data.stale || state->data.degraded || state->failed || !s_state.network.online
+        || s_state.now_ms - state->received_ms >= 300000
+        || (s_state.clock.valid && state->data.newest != s_state.clock.day);
+}
+
 static const char *network_label(void) {
     if (s_state.network.setup_active) return "配网";
     if (s_state.network.profile_busy) return "切换中";
@@ -116,6 +123,14 @@ static const char *network_label(void) {
         if (index < s_state.codex.data.count && !codex_monitor_fresh(&s_state.codex,
             &s_state.codex.data.tasks[index], true, s_state.now_ms)) return "采集非实时";
         return "Wi-Fi";
+    }
+    if (s_state.navigation.view == WORKOUT_VIEW_WELLNESS) {
+        if (!s_state.network.online) return "离线";
+        if (s_state.wellness.syncing) return "同步中";
+        if (s_state.wellness.failed) return "同步失败";
+        if (!s_state.clock.valid) return "等待校时";
+        if (!s_state.wellness.available) return "等待同步";
+        return wellness_old() ? "过期历史" : "Wi-Fi";
     }
     if (s_state.navigation.view == WORKOUT_VIEW_AI) {
         return ai_network_label();
@@ -244,11 +259,11 @@ static void details(lv_layer_t *layer) {
 
 static void menu(lv_layer_t *layer) {
     title(layer, "功能菜单");
-    static const char *entries[] = {"默认首页", "运动看板", "AI 用量", "Codex 任务", "立即同步", "设置"};
+    static const char *entries[] = {"默认首页", "运动看板", "AI 用量", "Codex 任务", "身体状况", "立即同步", "设置"};
     for (unsigned i = 0; i < WORKOUT_MENU_COUNT; i++) {
         bool selected = i == s_state.navigation.selection;
-        int y = 76 + (int)i * 34 + (i == WORKOUT_MENU_COUNT - 1 ? 10 : 0);
-        rectangle(layer, 20, y, 200, 30, selected ? UI_ACCENT : UI_PANEL);
+        int y = 68 + (int)i * 31;
+        rectangle(layer, 20, y, 200, 28, selected ? UI_ACCENT : UI_PANEL);
         label(layer, entries[i], 32, y + 5, 164, &workout_font_16,
               selected ? UI_BACKGROUND : UI_INK);
         if (selected) label(layer, "›", 202, y + 6, 12, &workout_font_16, UI_BACKGROUND);
@@ -961,6 +976,108 @@ static void connection(lv_layer_t *layer) {
     profile_hint(layer, "上下 选择  确定 执行");
 }
 
+static void wellness_value(lv_layer_t *layer, const wellness_record_t *record,
+                           wellness_metric_t metric, int x, int y, int width, bool unit) {
+    char value[48], text[64];
+    wellness_format(record, metric, value, sizeof(value));
+    bool known = (record->known & record->present & (1U << metric)) != 0;
+    snprintf(text, sizeof(text), "%s%s%s", value, unit && known ? " " : "",
+        unit && known ? wellness_metric_unit(metric) : "");
+    token_value(layer, text, x, y, width, &workout_font_16);
+}
+
+static void wellness_tiles(lv_layer_t *layer, const wellness_record_t *record,
+                           const wellness_metric_t *metrics) {
+    for (unsigned i = 0; i < 6; i++) {
+        int x = 20 + (int)(i % 2) * 104, y = 151 + (int)(i / 2) * 32;
+        rectangle(layer, x, y, 96, 30, UI_PANEL);
+        small(layer, wellness_metric_name(metrics[i]), x + 6, y + 2, 84);
+        wellness_value(layer, record, metrics[i], x + 6, y + 12, 84, true);
+    }
+}
+
+static void wellness_overview(lv_layer_t *layer, const wellness_record_t *record) {
+    rectangle(layer, 20, 84, 200, 65, UI_PANEL);
+    small(layer, "身体电量 · 当日最高", 30, 90, 180);
+    char value[48];
+    wellness_format(record, WELLNESS_ENERGY, value, sizeof(value));
+    bool known = record->known & (1U << WELLNESS_ENERGY);
+    label(layer, value, 30, 109, 150, known && record->values[WELLNESS_ENERGY] <= 1000
+        ? &workout_digits_35 : &workout_font_20, UI_INK);
+    if (known) small(layer, "/100", 174, 129, 38);
+    static const wellness_metric_t metrics[] = {WELLNESS_SLEEP, WELLNESS_SLEEP_SCORE,
+        WELLNESS_HR, WELLNESS_HRV, WELLNESS_WEIGHT, WELLNESS_STEPS};
+    wellness_tiles(layer, record, metrics);
+}
+
+static void wellness_sleep(lv_layer_t *layer, const wellness_record_t *record) {
+    rectangle(layer, 20, 84, 200, 65, UI_PANEL);
+    small(layer, "睡眠时长", 30, 90, 110);
+    char value[48];
+    bool known = record->known & (1U << WELLNESS_SLEEP);
+    if (known) snprintf(value, sizeof(value), "%lu:%02lu", (unsigned long)record->values[WELLNESS_SLEEP] / 3600,
+        (unsigned long)record->values[WELLNESS_SLEEP] / 60 % 60);
+    else wellness_format(record, WELLNESS_SLEEP, value, sizeof(value));
+    label(layer, value, 30, 111, 120, known && record->values[WELLNESS_SLEEP] < 36000 ? &workout_digits_35 : &workout_font_20, UI_INK);
+    rectangle(layer, 156, 93, 1, 47, UI_TRACK);
+    small(layer, "评分", 167, 94, 44);
+    wellness_value(layer, record, WELLNESS_SLEEP_SCORE, 160, 115, 51, false);
+    static const wellness_metric_t metrics[] = {WELLNESS_HR, WELLNESS_HRV,
+        WELLNESS_ENERGY, WELLNESS_SPO2, WELLNESS_WEIGHT, WELLNESS_STEPS};
+    wellness_tiles(layer, record, metrics);
+}
+
+static void wellness_table(lv_layer_t *layer, const wellness_record_t *record) {
+    for (unsigned i = 0; i < WELLNESS_METRICS; i++) {
+        int y = 84 + (int)i * 20;
+        if (!(i % 2)) rectangle(layer, 20, y, 200, 20, UI_PANEL);
+        small(layer, wellness_metric_name(i), 27, y + 3, 82);
+        wellness_value(layer, record, i, 111, y + 1, 102, true);
+    }
+}
+
+static void wellness_page(lv_layer_t *layer) {
+    title(layer, "身体状况");
+    static const char *styles[] = {"恢复概览 1/3", "睡眠重点 2/3", "指标明细 3/3"};
+    unsigned style = s_state.navigation.wellness_style % 3;
+    small(layer, styles[style], 20, 62, 100);
+    const wellness_state_t *state = &s_state.wellness;
+    hint(layer, "上下 日期  确定 换版");
+    small(layer, "长按下：刷新  长按确定：菜单", 20, 278, 208);
+    if (!state->available) {
+        label(layer, state->failed ? "数据暂不可用" : "等待身体数据", 20, 119, 200, &workout_font_20, UI_INK);
+        char message[64];
+        if (!s_state.network.has_config) strcpy(message, "请先在设置中连接服务器");
+        else if (state->http_status) snprintf(message, sizeof(message), "接口状态 HTTP %d", state->http_status);
+        else strcpy(message, !s_state.clock.valid ? "校时后读取近七天记录" : "请检查网络，长按下重试");
+        small(layer, message, 20, 161, 200);
+        return;
+    }
+    unsigned age = s_state.navigation.wellness_day % WELLNESS_DAYS;
+    passport_calendar_t day;
+    char date[48];
+    if (!passport_calendar_get(state->data.newest - (int32_t)age, &day)) return;
+    snprintf(date, sizeof(date), "%02u/%02u · %u/7", day.month, day.day, WELLNESS_DAYS - age);
+    small(layer, date, 127, 62, 93);
+    const wellness_record_t *record = &state->data.days[age];
+    if (!record->recorded) {
+        label(layer, "当日没有记录", 20, 120, 200, &workout_font_20, UI_INK);
+        small(layer, state->data.complete ? "该范围已同步，未返回当天记录" : "范围未完整同步，请稍后刷新", 20, 161, 208);
+    } else if (!style) wellness_overview(layer, record);
+    else if (style == 1) wellness_sleep(layer, record);
+    else wellness_table(layer, record);
+    small(layer, !state->data.complete ? "同步范围不完整" : wellness_old()
+        ? "显示上次记录 · 尚未更新" : "上游原始指标", 20, 249, 200);
+    char stamp[64];
+    if (s_state.request_failed) strcpy(stamp, "刷新未提交，请稍后重试");
+    else if (state->failed) snprintf(stamp, sizeof(stamp), "刷新失败 HTTP %d · 长按下重试", state->http_status);
+    else if (!state->data.fetched_at[0]) strcpy(stamp, "同步时间未提供");
+    else snprintf(stamp, sizeof(stamp), "同步 %.2s/%.2s %.5s %s", state->data.fetched_at + 5,
+        state->data.fetched_at + 8, state->data.fetched_at + 11,
+        state->data.fetched_at[strlen(state->data.fetched_at) - 1] == 'Z' ? "UTC" : state->data.fetched_at + strlen(state->data.fetched_at) - 6);
+    small(layer, stamp, 20, 264, 205);
+}
+
 static void draw(lv_event_t *event) {
     lv_layer_t *layer = lv_event_get_layer(event);
     header(layer);
@@ -987,13 +1104,7 @@ static void draw(lv_event_t *event) {
             small(layer, "保留运动和 AI 缓存", 20, 181, 205);
             hint(layer, "确定 清除  上下 取消");
             break;
-        case WORKOUT_VIEW_FUTURE:
-            title(layer, "更多页面");
-            for (unsigned i = 0; i < 9; i++) rectangle(layer, 90 + (int)(i % 3) * 22,
-                                                     123 + (int)(i / 3) * 22, 18, 18, i < 4 ? UI_ACCENT : UI_TRACK);
-            small(layer, "为下一项功能预留", 68, 218, 145);
-            hint(layer, "长按确定：页面菜单");
-            break;
+        case WORKOUT_VIEW_WELLNESS: wellness_page(layer); break;
     }
     if (s_state.codex_popup) codex_popup(layer);
 }

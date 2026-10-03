@@ -83,7 +83,7 @@ static void navigate_input(workout_input_t input) {
         && s_state.navigation.view != WORKOUT_VIEW_DASHBOARD && s_state.navigation.view != WORKOUT_VIEW_AI
         && s_state.navigation.view != WORKOUT_VIEW_CODEX && s_state.navigation.view != WORKOUT_VIEW_CODEX_DETAILS
         && s_state.navigation.view != WORKOUT_VIEW_HOME && s_state.navigation.view != WORKOUT_VIEW_CALENDAR
-        && s_state.navigation.view != WORKOUT_VIEW_ALMANAC
+        && s_state.navigation.view != WORKOUT_VIEW_ALMANAC && s_state.navigation.view != WORKOUT_VIEW_WELLNESS
         && s_state.navigation.view != WORKOUT_VIEW_DETAILS && s_state.navigation.view != WORKOUT_VIEW_MENU) {
         s_state.request_failed = true;
         refresh();
@@ -195,6 +195,7 @@ static void update_network(void) {
         changed = true;
     }
     if (workout_network_take_quota(&s_state.quota)) changed = true;
+    if (workout_network_take_wellness(&s_state.wellness)) changed = true;
     if (workout_network_take_tokens(&s_state.tokens)) changed = true;
     if (update_codex()) changed = true;
     if (changed) refresh();

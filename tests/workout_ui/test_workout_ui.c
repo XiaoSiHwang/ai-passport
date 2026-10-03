@@ -336,6 +336,42 @@ static void codex_screens(workout_ui_state_t *state) {
     codex_text_screens(state);
 }
 
+static void wellness_screens(workout_ui_state_t *state) {
+    state->network.online = state->network.has_config = true;
+    state->network.setup_active = false;
+    state->clock.valid = true;
+    int64_t day;
+    assert(workout_parse_date("2026-10-03", &day));
+    state->clock.day = (int32_t)day;
+    state->navigation.view = WORKOUT_VIEW_WELLNESS;
+    state->wellness = (wellness_state_t){.available = true, .received_ms = state->now_ms};
+    state->wellness.data.newest = (int32_t)day;
+    state->wellness.data.complete = true;
+    strcpy(state->wellness.data.fetched_at, "2026-10-03T12:00:00+08:00");
+    wellness_record_t *record = &state->wellness.data.days[0];
+    *record = (wellness_record_t){.recorded = true, .present = 255, .known = 255,
+        .values = {900, 25200, 500, 420, 655, 6820, 800, 980}};
+    for (unsigned i = 0; i < 3; i++) {
+        char path[48];
+        state->navigation.wellness_style = i;
+        snprintf(path, sizeof(path), "wellness-%u.ppm", i + 1);
+        workout_ui_update(state); screenshot(path);
+    }
+    record->values[WELLNESS_STEPS] = 0;
+    record->known &= ~(1U << WELLNESS_HRV);
+    record->present &= ~(1U << WELLNESS_SPO2);
+    record->known &= ~(1U << WELLNESS_SPO2);
+    workout_ui_update(state); screenshot("wellness-missing.ppm");
+    state->wellness.data.complete = false; state->wellness.data.stale = true;
+    workout_ui_update(state); screenshot("wellness-stale.ppm");
+    state->navigation.wellness_day = 1;
+    workout_ui_update(state); screenshot("wellness-empty.ppm");
+    state->wellness.available = false; state->wellness.failed = true; state->wellness.http_status = 503;
+    workout_ui_update(state); screenshot("wellness-error.ppm");
+    state->navigation.view = WORKOUT_VIEW_MENU; state->navigation.selection = 4;
+    workout_ui_update(state); screenshot("wellness-menu.ppm");
+}
+
 int main(void) {
     lv_init();
     lv_display_t *display = lv_display_create(240, 320);
@@ -401,6 +437,7 @@ int main(void) {
     }
     lv_mem_monitor(&after);
     assert(before.free_size == after.free_size);
+    wellness_screens(&state);
     puts("Repeated QR/page lifecycle: PASS");
     return 0;
 }

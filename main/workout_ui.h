@@ -9,6 +9,7 @@ typedef struct {
     workout_network_status_t network;
     ai_quota_update_t quota;
     ai_tokens_update_t tokens;
+    wellness_state_t wellness;
     codex_monitor_state_t codex;
     codex_alert_t codex_alert;
     bool codex_popup;

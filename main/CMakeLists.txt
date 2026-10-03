@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "main.c"
          "workout_model.c"
+         "wellness.c"
          "workout_power.c"
          "passport_calendar.c"
          "workout_profiles.c"

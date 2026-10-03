@@ -60,7 +60,7 @@ run_static_checks() {
         -o "${test_dir}/test_workout_profiles"
     "${test_dir}/test_workout_profiles"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/network_stubs -Itests/workout_stubs -Imain \
-        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c main/ai_tokens.c main/codex_monitor.c main/workout_power.c \
+        tests/test_workout_network.c main/workout_profiles.c main/workout_model.c main/ai_quota.c main/ai_tokens.c main/codex_monitor.c main/workout_power.c main/wellness.c main/passport_calendar.c \
         -o "${test_dir}/test_workout_network"
     "${test_dir}/test_workout_network"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -75,6 +75,10 @@ run_static_checks() {
         tests/test_workout_store.c main/workout_store.c main/workout_model.c main/workout_profiles.c main/ai_quota.c main/ai_tokens.c \
         -o "${test_dir}/test_workout_store"
     "${test_dir}/test_workout_store"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_wellness.c main/wellness.c main/passport_calendar.c main/workout_model.c \
+        -o "${test_dir}/test_wellness"
+    "${test_dir}/test_wellness"
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_workout_fonts.py
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \
         tests/test_bsp_display_rounding.c components/bsp/src/bsp_display_rounding.c \
@@ -152,6 +156,12 @@ run_firmware_checks() (
         main/workout_json.c main/workout_model.c main/workout_profiles.c main/ai_quota.c main/ai_tokens.c \
         "${validation_build_dir}/cjson_host.o" -lm -o "${validation_build_dir}/test_codex_monitor_json"
     "${validation_build_dir}/test_codex_monitor_json"
+
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        -I"${IDF_PATH}/components/json/cJSON" tests/test_wellness_json.c \
+        main/workout_json.c main/workout_model.c main/workout_profiles.c main/ai_quota.c main/ai_tokens.c \
+        "${validation_build_dir}/cjson_host.o" -lm -o "${validation_build_dir}/test_wellness_json"
+    "${validation_build_dir}/test_wellness_json"
 
     SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
         idf.py -B "${validation_build_dir}" \

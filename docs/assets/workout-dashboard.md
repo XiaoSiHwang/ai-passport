@@ -16,6 +16,7 @@ the firmware palette.
 | Page | Up / Down | OK | Long OK |
 | --- | --- | --- | --- |
 | Home | Select calendar, Codex quota or GLM quota | Open month calendar or selected quota | Page menu |
+| Wellness | Previous / next date within seven days | Cycle recovery overview, sleep focus, metric table | Page menu |
 | Month calendar / almanac | Previous / next day | Switch calendar / almanac | Page menu |
 | Workout dashboard / details | Switch week and month | Open / close details | Page menu |
 | AI quota pages | Switch Codex / GLM; return to five hours | Cycle five hours, seven days, Token heatmap | Page menu |
@@ -28,7 +29,7 @@ the firmware palette.
 | Codex tasks / details | Switch the three returned tasks | Open / close details; retry a failed sync | Page menu |
 | Approval reminder | No page action | Dismiss locally | Dismiss locally |
 
-The menu order is home, workout dashboard, AI usage, Codex tasks, manual synchronization,
+The menu order is home, workout dashboard, AI usage, Codex tasks, wellness, manual synchronization,
 and settings. Settings opens the network/interface hub; manual sync returns to home.
 Long Down on the network page opens a
 confirmation to clear all saved Wi-Fi networks and server addresses. OK confirms;
@@ -77,6 +78,36 @@ with HTTP/HTTPS, and battery-side average-current measurements before and after
 the change. Measure away from a computer USB connection too: USB Serial/JTAG
 connection protection can prevent automatic light sleep. Board amplifier/codec
 residual current and actual battery life are not established by a build.
+
+## Wellness
+
+The wellness page reads `GET /api/wellness?oldest=YYYY-MM-DD&newest=YYYY-MM-DD`
+from the configured workout server, after a valid UTC+8 clock is available.
+The inclusive range is today and the six preceding dates. It refreshes every
+five minutes, on page entry, through manual synchronization, or with Long Down
+on the wellness page; the ordinary GET may reuse the backend cache. Failed
+requests retry no sooner than 30 seconds. No full-history POST is sent.
+
+Three layouts share the same records and light palette: a recovery overview
+with the day's maximum body battery, a sleep-focused view with duration and
+sleep score, and a compact table with all eight supported metrics. The fields
+are `BodyBatteryMax`, `sleepSecs`, `restingHR`, `hrv`, `weight`, `steps`,
+`sleepScore`, and `spO2`. These are upstream measurements, not an application
+health score or medical assessment. Duration is displayed in hours and minutes;
+other fractional values are rounded to tenths. Custom nested fields are ignored.
+Explicit null, an absent field, numeric zero, and a day with no record have
+different labels. A complete range does not imply a record on every date.
+
+Stale/degraded responses, incomplete sync coverage, and transport/HTTP failures
+remain visible. A failed request retains the last successful in-memory result;
+changing or clearing the server discards it. Health data is not persisted in
+device NVS, so a cold restart while offline shows an unavailable state. Response
+bodies are capped at 16 KiB, JSON nesting at ten levels, and decoded records at
+seven dates. Oversized or invalid responses are rejected without replacing the
+last result. The displayed sync timestamp retains the backend's timezone and
+is not a per-record refresh guarantee. Host-rendered previews use synthetic
+fixtures; live backend, fonts, heap stability and button operation need device
+acceptance.
 
 ## Clock, calendar and almanac
 

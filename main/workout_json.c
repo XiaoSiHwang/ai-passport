@@ -1,14 +1,15 @@
 #include "workout_json.h"
 #include "codex_monitor.h"
 #include "workout_profiles.h"
+#include "wellness.h"
 
 #include "cJSON.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-static cJSON *bounded_json(const char *json, size_t length, unsigned token_limit) {
-    if (!json || !length || length > WORKOUT_JSON_LIMIT) return NULL;
+static cJSON *bounded_json_limit(const char *json, size_t length, unsigned token_limit, size_t limit) {
+    if (!json || !length || length > limit) return NULL;
     unsigned depth = 0, tokens = 0;
     bool quoted = false, escaped = false;
     for (size_t i = 0; i < length; i++) {
@@ -32,6 +33,10 @@ static cJSON *bounded_json(const char *json, size_t length, unsigned token_limit
     while (end < json + length && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '\t')) end++;
     if (end != json + length) { cJSON_Delete(root); return NULL; }
     return root;
+}
+
+static cJSON *bounded_json(const char *json, size_t length, unsigned token_limit) {
+    return bounded_json_limit(json, length, token_limit, WORKOUT_JSON_LIMIT);
 }
 
 static bool unique_object(const cJSON *object) {
@@ -420,5 +425,69 @@ bool codex_alerts_decode(const char *json, size_t length, codex_alert_page_t *pa
     cJSON_Delete(root);
     if (valid) *page = *result;
     free(result);
+    return valid;
+}
+
+static bool wellness_record(const cJSON *object, wellness_record_t *record) {
+    static const char *keys[] = {"BodyBatteryMax", "sleepSecs", "restingHR", "hrv",
+        "weight", "steps", "sleepScore", "spO2"};
+    if (!unique_object(object)) return false;
+    record->recorded = true;
+    for (unsigned i = 0; i < WELLNESS_METRICS; i++) {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, keys[i]);
+        if (!item) continue;
+        record->present |= 1U << i;
+        if (cJSON_IsNull(item)) continue;
+        bool integer = i == WELLNESS_SLEEP || i == WELLNESS_STEPS;
+        if (!number(object, keys[i], integer ? 1 : 10, integer ? 10000000 : 100000, &record->values[i])) return false;
+        record->known |= 1U << i;
+    }
+    return true;
+}
+
+static bool wellness_payload(const cJSON *object, wellness_data_t *result) {
+    char oldest[11], newest[11], source[24];
+    int64_t first, last;
+    if (!unique_object(object) || !string(object, "source", source, sizeof(source))
+        || strcmp(source, "intervals_icu") || !string(object, "oldest", oldest, sizeof(oldest))
+        || !string(object, "newest", newest, sizeof(newest)) || !workout_parse_date(oldest, &first)
+        || !workout_parse_date(newest, &last) || last - first != WELLNESS_DAYS - 1
+        || first < PASSPORT_CALENDAR_FIRST_DAY || last > PASSPORT_CALENDAR_LAST_DAY) return false;
+    result->newest = (int32_t)last;
+    const cJSON *stale = cJSON_GetObjectItemCaseSensitive(object, "stale");
+    const cJSON *complete = cJSON_GetObjectItemCaseSensitive(object, "complete");
+    const cJSON *fetched = cJSON_GetObjectItemCaseSensitive(object, "fetched_at");
+    if (!cJSON_IsBool(stale) || !cJSON_IsBool(complete) || (!cJSON_IsNull(fetched)
+        && !string(object, "fetched_at", result->fetched_at, sizeof(result->fetched_at)))) return false;
+    int64_t stamp;
+    if (result->fetched_at[0] && !workout_parse_timestamp(result->fetched_at, &stamp)) return false;
+    result->stale = cJSON_IsTrue(stale);
+    result->complete = cJSON_IsTrue(complete);
+    const cJSON *records = cJSON_GetObjectItemCaseSensitive(object, "records");
+    if (!cJSON_IsArray(records) || cJSON_GetArraySize(records) > WELLNESS_DAYS) return false;
+    int64_t previous = first - 1;
+    for (const cJSON *item = records->child; item; item = item->next) {
+        char date[11];
+        int64_t day;
+        if (!string(item, "id", date, sizeof(date)) || !workout_parse_date(date, &day)
+            || day <= previous || day < first || day > last
+            || !wellness_record(item, &result->days[last - day])) return false;
+        previous = day;
+    }
+    return true;
+}
+
+bool wellness_decode_response(const char *json, size_t length, wellness_data_t *data) {
+    cJSON *root = bounded_json_limit(json, length, 2048, WELLNESS_JSON_LIMIT);
+    if (!root) return false;
+    wellness_data_t result = {0};
+    const cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
+    bool valid = unique_object(root) && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "success"))
+        && wellness_payload(cJSON_GetObjectItemCaseSensitive(root, "data"), &result)
+        && (cJSON_IsNull(error) || (unique_object(error)
+            && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(error, "message"))));
+    result.degraded = !cJSON_IsNull(error);
+    if (valid) *data = result;
+    cJSON_Delete(root);
     return valid;
 }

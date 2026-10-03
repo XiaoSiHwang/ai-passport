@@ -1,11 +1,25 @@
 /* Fault injection against the actual worker, without radio/HTTP/NVS hardware. */
 #include "network_test_stubs.h"
+#define time wellness_test_time
 #include "../main/workout_network.c"
+#undef time
 #include <assert.h>
 
 const char test_wifi_event[] = "wifi", test_ip_event[] = "ip";
 struct test_queue { size_t size; unsigned count, capacity; unsigned char data[4096]; };
 static int64_t s_clock;
+static time_t s_wall_clock = 1790996400;
+static bool s_wellness_valid, s_wellness_http;
+static wellness_data_t s_wire_wellness;
+time_t wellness_test_time(time_t *value) {
+    if (value) *value = s_wall_clock;
+    return s_wall_clock;
+}
+bool wellness_decode_response(const char *json, size_t length, wellness_data_t *data) {
+    (void)json; (void)length;
+    if (s_wellness_valid) *data = s_wire_wellness;
+    return s_wellness_valid;
+}
 static wifi_config_t s_station;
 static wifi_ap_record_t s_associated;
 static workout_profiles_t s_disk;
@@ -121,6 +135,12 @@ esp_err_t esp_http_client_set_user_data(esp_http_client_handle_t client, void *u
 }
 esp_err_t esp_http_client_perform(esp_http_client_handle_t client) {
     (void)client;
+    if (s_wellness_http && strstr(s_http_url, "/api/wellness?")) {
+        char payload[8192] = {0};
+        esp_http_client_event_t event = {.event_id = HTTP_EVENT_ON_DATA, .user_data = s_http_config.user_data,
+            .data = payload, .data_len = sizeof(payload)};
+        return s_http_config.event_handler(&event);
+    }
     if (s_tokens_http && strstr(s_http_url, "/tokens")) {
         esp_http_client_event_t event = {.event_id = HTTP_EVENT_ON_DATA, .user_data = s_http_config.user_data,
             .data = "tokens", .data_len = 6};
@@ -135,6 +155,7 @@ esp_err_t esp_http_client_perform(esp_http_client_handle_t client) {
 }
 int esp_http_client_get_status_code(esp_http_client_handle_t client) {
     (void)client;
+    if (s_wellness_http && strstr(s_http_url, "/api/wellness?")) return 200;
     if (s_tokens_http && strstr(s_http_url, "/tokens")) return 200;
     return s_monitor_http && s_http_monitor ? s_monitor_code : 503;
 }
@@ -214,7 +235,7 @@ static void fixture(void) {
     s_http_set_failure = false;
     if (s_commands) {
         vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates);
-        vQueueDelete(s_tokens_updates);
+        vQueueDelete(s_tokens_updates); vQueueDelete(s_wellness_updates);
         vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts); vEventGroupDelete(s_events);
     }
     memset(&s_disk, 0, sizeof(s_disk));
@@ -483,6 +504,7 @@ static void idle_deadlines_and_connections(void) {
     s_next_sync = s_clock + 300000;
     for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = s_next_tokens[i] = s_clock + 60000;
     s_next_codex_tasks = s_clock + 5000; s_next_codex_alerts = s_clock + 7000;
+    s_next_wellness = s_clock + 300000;
     assert(network_wait_ms() == 5000); /* No fixed 250ms wake while nothing is due. */
     unsigned inits = s_http_inits;
     sync_codex_tasks(); sync_codex_alerts();
@@ -509,7 +531,35 @@ static void idle_deadlines_and_connections(void) {
     s_ready = false; assert(network_wait_ms() == 60000);
 }
 
+static void wellness_sync_and_source(void) {
+    fixture();
+    xEventGroupSetBits(s_events, CONNECTED_BIT);
+    passport_clock_t clock;
+    assert(passport_calendar_clock(s_wall_clock, &clock));
+    s_wire_wellness = (wellness_data_t){.newest = clock.day, .complete = true, .stale = true};
+    s_wellness_valid = s_wellness_http = true;
+    sync_wellness();
+    assert(strstr(s_http_url, "/api/wellness?oldest=") && strstr(s_http_url, "&newest="));
+    assert(s_wellness.available && s_wellness.data.stale && !s_wellness.failed);
+    s_wellness_valid = false;
+    sync_wellness();
+    assert(s_wellness.failed && s_wellness.available && s_wellness.data.stale);
+    s_wellness_valid = true; s_wire_wellness.newest--;
+    sync_wellness();
+    assert(s_wellness.failed && s_wellness.data.newest == clock.day);
+    assert(workout_network_request(WORKOUT_ACTION_WELLNESS_SYNC)); command();
+    assert(!s_next_wellness);
+    workout_config_t config = s_config;
+    strcpy(config.server, "http://other.example.com/api/workout");
+    activate_config(&config);
+    assert(!s_wellness.available && !s_wellness.failed);
+    wellness_state_t update;
+    assert(workout_network_take_wellness(&update) && !update.available);
+    s_wellness_valid = s_wellness_http = false;
+}
+
 int main(void) {
+    wellness_sync_and_source();
     automatic_fallback(); manual_wifi(); server_switch(); cooldown_and_setup(); automatic_storage_retry();
     monitoring_replay(); monitoring_backpressure(); monitoring_source_and_expiry();
     monitoring_slow_legacy();
@@ -519,7 +569,7 @@ int main(void) {
     close_http_client();
     vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates); vEventGroupDelete(s_events);
     vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts);
-    vQueueDelete(s_tokens_updates);
+    vQueueDelete(s_tokens_updates); vQueueDelete(s_wellness_updates);
     puts("Workout worker network fault injection: PASS");
     return 0;
 }

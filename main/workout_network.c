@@ -39,7 +39,9 @@
 
 static const char *TAG = "workout_net";
 static QueueHandle_t s_commands, s_updates, s_quota_updates, s_codex_updates, s_codex_alerts;
-static QueueHandle_t s_tokens_updates;
+static QueueHandle_t s_tokens_updates, s_wellness_updates;
+static wellness_state_t s_wellness;
+static int64_t s_next_wellness;
 static EventGroupHandle_t s_events;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static workout_network_status_t s_status;
@@ -84,7 +86,7 @@ typedef struct {
 
 typedef struct {
     char *body;
-    size_t length;
+    size_t length, capacity;
     bool oversized;
 } http_body_t;
 
@@ -372,6 +374,21 @@ bool workout_network_take_tokens(ai_tokens_update_t *update) {
     return s_tokens_updates && xQueueReceive(s_tokens_updates, update, 0) == pdTRUE;
 }
 
+bool workout_network_take_wellness(wellness_state_t *update) {
+    return s_wellness_updates && xQueueReceive(s_wellness_updates, update, 0) == pdTRUE;
+}
+
+static void wellness_publish(void) {
+    xQueueOverwrite(s_wellness_updates, &s_wellness);
+    notify_app();
+}
+
+static void wellness_reset(void) {
+    memset(&s_wellness, 0, sizeof(s_wellness));
+    s_next_wellness = 0;
+    if (s_wellness_updates) wellness_publish();
+}
+
 bool workout_network_take_codex(codex_monitor_state_t *update) {
     return s_codex_updates && xQueueReceive(s_codex_updates, update, 0) == pdTRUE;
 }
@@ -435,7 +452,7 @@ static void tokens_restore(void) {
 static esp_err_t http_event(esp_http_client_event_t *event) {
     if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
     http_body_t *body = event->user_data;
-    if (event->data_len < 0 || (size_t)event->data_len > WORKOUT_JSON_LIMIT - body->length) {
+    if (event->data_len < 0 || (size_t)event->data_len > (body->capacity ? body->capacity : WORKOUT_JSON_LIMIT) - body->length) {
         body->oversized = true;
         return ESP_FAIL;
     }
@@ -466,7 +483,7 @@ static void close_http_client(void) {
 static bool fetch_body(const char *url, http_body_t *body, int *code, int timeout_ms) {
     *code = 0;
     if (!https_clock()) return false;
-    body->body = calloc(1, WORKOUT_JSON_LIMIT + 1);
+    body->body = calloc(1, (body->capacity ? body->capacity : WORKOUT_JSON_LIMIT) + 1);
     if (!body->body) return false;
     if (!s_http_client) {
         const esp_http_client_config_t config = {
@@ -663,12 +680,38 @@ static void sync_codex_alerts(void) {
     codex_publish();
 }
 
+static void sync_wellness(void) {
+    s_next_wellness = now_ms() + RECONNECT_INTERVAL_MS;
+    if (!(xEventGroupGetBits(s_events) & CONNECTED_BIT)) return;
+    passport_clock_t clock;
+    char url[WORKOUT_URL_SIZE];
+    if (!passport_calendar_clock(time(NULL), &clock) || !wellness_url(s_config.server, clock.day, url)) return;
+    s_wellness.syncing = true;
+    wellness_publish();
+    http_body_t body = {.capacity = WELLNESS_JSON_LIMIT};
+    int code = 0;
+    wellness_data_t data;
+    bool valid = fetch_body(url, &body, &code, 8000)
+        && wellness_decode_response(body.body, body.length, &data) && data.newest == clock.day;
+    free(body.body);
+    s_wellness.syncing = false;
+    s_wellness.failed = !valid;
+    s_wellness.http_status = code;
+    if (valid) {
+        s_wellness.data = data;
+        s_wellness.available = true;
+        s_wellness.received_ms = now_ms();
+        s_next_wellness = now_ms() + WORKOUT_SYNC_INTERVAL_MS;
+    }
+    wellness_publish();
+}
+
 static void sync_due(int64_t now, bool connected) {
     /* Give monitoring two turns between slow legacy requests, without starving either group. */
-    int64_t due[] = {s_next_sync, s_next_quota[0], s_next_quota[1], s_next_tokens[0], s_next_tokens[1]};
+    int64_t due[] = {s_next_sync, s_next_quota[0], s_next_quota[1], s_next_tokens[0], s_next_tokens[1], s_next_wellness};
     int legacy = -1;
-    for (unsigned i = 0; i < 5; i++) {
-        unsigned kind = (s_sync_turn + i) % 5;
+    for (unsigned i = 0; i < 6; i++) {
+        unsigned kind = (s_sync_turn + i) % 6;
         if (now >= due[kind]) { legacy = (int)kind; break; }
     }
     bool tasks = now >= s_next_codex_tasks, alerts = now >= s_next_codex_alerts;
@@ -681,11 +724,12 @@ static void sync_due(int64_t now, bool connected) {
         return;
     }
     if (legacy >= 0) {
-        s_sync_turn = ((unsigned)legacy + 1) % 5;
+        s_sync_turn = ((unsigned)legacy + 1) % 6;
         s_monitor_budget = 2;
         if (!legacy) sync_data();
         else if (legacy < 3) sync_quota((unsigned)legacy - 1);
-        else sync_tokens((unsigned)legacy - 3);
+        else if (legacy < 5) sync_tokens((unsigned)legacy - 3);
+        else sync_wellness();
     } else if (!connected) {
         if (tasks) s_next_codex_tasks = now + CODEX_RETRY_INTERVAL_MS;
         if (alerts) s_next_codex_alerts = now + CODEX_RETRY_INTERVAL_MS;
@@ -748,6 +792,7 @@ static void activate_config(const workout_config_t *config) {
     s_config = *config;
     quota_source_changed();
     if (new_source) {
+        wellness_reset();
         memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
         codex_reset();
         memset(&s_cache, 0, sizeof(s_cache));
@@ -905,6 +950,7 @@ static void connection_cleared(void) {
 static void clear_config(void) {
     if (workout_store_clear_config() != ESP_OK) { setup_result(WORKOUT_SETUP_STORAGE, false); return; }
     close_http_client();
+    wellness_reset();
     s_pending_deadline = 0;
     memset(&s_candidate, 0, sizeof(s_candidate));
     memset(&s_config, 0, sizeof(s_config));
@@ -940,7 +986,10 @@ static void process_command(const network_command_t *command) {
             s_next_sync = 0;
             for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = s_next_tokens[i] = 0;
             s_next_codex_tasks = s_next_codex_alerts = 0;
+            s_next_wellness = 0;
         }
+    } else if (command->kind == WORKOUT_ACTION_WELLNESS_SYNC) {
+        s_next_wellness = 0;
     } else if (command->kind == WORKOUT_ACTION_CODEX_SYNC) {
         s_next_codex_tasks = s_next_codex_alerts = 0;
     } else if (command->kind == WORKOUT_ACTION_RECONNECT) {
@@ -973,6 +1022,7 @@ static void network_tick(void) {
         s_next_sync = 0;
         for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = s_next_tokens[i] = 0;
         s_next_codex_tasks = s_next_codex_alerts = 0;
+        s_next_wellness = 0;
         s_sync_turn = 0;
         s_monitor_budget = 0;
         s_monitor_alert_turn = false;
@@ -1004,7 +1054,7 @@ static uint32_t network_wait_ms(void) {
     if ((bits & JUST_CONNECTED_BIT) || ((bits & DISCONNECTED_BIT)
         && !status.setup_active && s_profiles.wifi_count)) return 0;
     if (s_pending_deadline) return workout_deadline_wait_ms(now, &s_pending_deadline, 1, 60000);
-    int64_t deadlines[7 + AI_QUOTA_PROVIDERS * 2];
+    int64_t deadlines[8 + AI_QUOTA_PROVIDERS * 2];
     size_t count = 0;
     if (s_close_at) deadlines[count++] = s_close_at;
     if (s_setup_deadline) deadlines[count++] = s_setup_deadline;
@@ -1013,6 +1063,7 @@ static uint32_t network_wait_ms(void) {
     if (s_profile_dirty && (bits & CONNECTED_BIT)) deadlines[count++] = s_next_profile_save;
     if (s_config.ssid[0]) {
         deadlines[count++] = s_next_sync;
+        deadlines[count++] = s_next_wellness;
         deadlines[count++] = s_next_codex_tasks;
         deadlines[count++] = s_next_codex_alerts;
         for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
@@ -1062,6 +1113,8 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     s_updates = xQueueCreate(1, sizeof(workout_network_update_t));
     s_quota_updates = xQueueCreate(1, sizeof(ai_quota_update_t));
     s_tokens_updates = xQueueCreate(1, sizeof(ai_tokens_update_t));
+    s_wellness_updates = xQueueCreate(1, sizeof(wellness_state_t));
+    wellness_reset();
     s_codex_updates = xQueueCreate(1, sizeof(codex_monitor_state_t));
     s_codex_alerts = xQueueCreate(CODEX_ALERT_LIMIT, sizeof(codex_alert_t));
     memset(&s_codex_cursor, 0, sizeof(s_codex_cursor));
@@ -1070,7 +1123,7 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     s_monitor_budget = 0;
     s_monitor_alert_turn = false;
     bool queues = s_events && s_commands && s_updates && s_quota_updates && s_tokens_updates
-        && s_codex_updates && s_codex_alerts;
+        && s_codex_updates && s_codex_alerts && s_wellness_updates;
     if (queues) {
         for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
             (void)workout_store_load_quota(i, &s_quota_cache[i]);
@@ -1085,11 +1138,12 @@ esp_err_t workout_network_start(const workout_config_t *config, const workout_ca
     if (s_updates) vQueueDelete(s_updates);
     if (s_quota_updates) vQueueDelete(s_quota_updates);
     if (s_tokens_updates) vQueueDelete(s_tokens_updates);
+    if (s_wellness_updates) vQueueDelete(s_wellness_updates);
     if (s_codex_updates) vQueueDelete(s_codex_updates);
     if (s_codex_alerts) vQueueDelete(s_codex_alerts);
     s_commands = s_updates = NULL;
     s_quota_updates = NULL;
-    s_tokens_updates = NULL;
+    s_tokens_updates = s_wellness_updates = NULL;
     s_codex_updates = s_codex_alerts = NULL;
     s_events = NULL;
     network_error(WORKOUT_NET_INIT, 0);

@@ -51,7 +51,7 @@ python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --con
 首页时钟使用 `fonts/workout_clock_50.c`：相同 OFL 许可证下的 Noto Sans CJK SC
 数字子集，包含 `0`–`9`、冒号和短横线，为未压缩 2 bpp、50 px。上面的命令同时
 生成此字体，通过 `main/CMakeLists.txt` 编译。固定 12 / 16 / 20 px 字符集现在
-还收集日历格式化代码和生成的农历 / 黄历文案，共 576 个码点。先生成日历数据，
+还收集日历格式化代码、生成的农历 / 黄历文案和身体指标文案，共 613 个码点。先生成日历数据，
 再更新字体。静态 cmap 检查覆盖时钟和日历字符集，主机 LVGL 渲染验证实际选用字体。
 
 脚本收集界面字符（包括标点），选择 12 / 16 / 20 px、2 bpp、不压缩、无字距调整。同时生成

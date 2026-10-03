@@ -212,7 +212,7 @@ static workout_action_t profiles_navigate(workout_navigation_t *nav, workout_inp
 
 workout_view_t workout_menu_view(unsigned selection) {
     static const workout_view_t views[] = {WORKOUT_VIEW_HOME, WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_AI,
-        WORKOUT_VIEW_CODEX, WORKOUT_VIEW_HOME, WORKOUT_VIEW_NETWORK};
+        WORKOUT_VIEW_CODEX, WORKOUT_VIEW_WELLNESS, WORKOUT_VIEW_HOME, WORKOUT_VIEW_NETWORK};
     return views[selection % WORKOUT_MENU_COUNT];
 }
 
@@ -225,9 +225,11 @@ static workout_action_t menu_navigate(workout_navigation_t *nav, workout_input_t
         nav->ai_weekly = nav->ai_heatmap = false;
         nav->ai_day = 29;
     }
-    bool sync = nav->selection == 4;
+    bool sync = nav->selection == 5;
+    if (nav->view == WORKOUT_VIEW_WELLNESS) nav->wellness_day = 0;
     nav->selection = 0;
-    return sync ? WORKOUT_ACTION_SYNC : WORKOUT_ACTION_NONE;
+    return sync ? WORKOUT_ACTION_SYNC : nav->view == WORKOUT_VIEW_WELLNESS
+        ? WORKOUT_ACTION_WELLNESS_SYNC : WORKOUT_ACTION_NONE;
 }
 
 static workout_action_t open_menu(workout_navigation_t *nav) {
@@ -310,6 +312,11 @@ workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t inp
         codex_navigate(nav, input);
     } else if (nav->view == WORKOUT_VIEW_AI) {
         ai_navigate(nav, input);
+    } else if (nav->view == WORKOUT_VIEW_WELLNESS) {
+        if (input == WORKOUT_INPUT_UP && nav->wellness_day < 6) nav->wellness_day++;
+        if (input == WORKOUT_INPUT_DOWN && nav->wellness_day) nav->wellness_day--;
+        if (input == WORKOUT_INPUT_OK) nav->wellness_style = (nav->wellness_style + 1) % 3;
+        if (input == WORKOUT_INPUT_CLEAR) return WORKOUT_ACTION_WELLNESS_SYNC;
     } else if (nav->view == WORKOUT_VIEW_SETUP) {
         if (input == WORKOUT_INPUT_CLEAR) nav->view = WORKOUT_VIEW_CLEAR;
         if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) nav->setup_step ^= 1;

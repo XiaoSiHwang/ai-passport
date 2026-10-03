@@ -129,6 +129,7 @@ static void navigation(void) {
     assert(nav.view == WORKOUT_VIEW_CODEX);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SYNC);
     assert(nav.view == WORKOUT_VIEW_HOME && nav.monthly);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
@@ -185,11 +186,11 @@ static void home_navigation(void) {
     workout_navigate(&nav, WORKOUT_INPUT_OK);
     assert(nav.view == WORKOUT_VIEW_AI && nav.ai_provider == 0);
     const workout_view_t expected[] = {WORKOUT_VIEW_HOME, WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_AI,
-        WORKOUT_VIEW_CODEX, WORKOUT_VIEW_HOME, WORKOUT_VIEW_NETWORK};
+        WORKOUT_VIEW_CODEX, WORKOUT_VIEW_WELLNESS, WORKOUT_VIEW_HOME, WORKOUT_VIEW_NETWORK};
     for (unsigned i = 0; i < WORKOUT_MENU_COUNT; i++) {
         nav.view = WORKOUT_VIEW_MENU; nav.selection = i;
         assert(workout_menu_view(i) == expected[i]);
-        assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == (i == 4 ? WORKOUT_ACTION_SYNC : WORKOUT_ACTION_NONE));
+        assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == (i == 5 ? WORKOUT_ACTION_SYNC : i == 4 ? WORKOUT_ACTION_WELLNESS_SYNC : WORKOUT_ACTION_NONE));
         assert(nav.view == expected[i]);
     }
 }
