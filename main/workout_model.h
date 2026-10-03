@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "passport_calendar.h"
 
 #define WORKOUT_URL_SIZE 192
 #define WORKOUT_JSON_LIMIT 4096
@@ -47,11 +48,14 @@ typedef struct {
 } workout_config_t;
 
 typedef enum {
-    WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_DETAILS, WORKOUT_VIEW_MENU,
+    WORKOUT_VIEW_HOME, WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_DETAILS, WORKOUT_VIEW_MENU,
     WORKOUT_VIEW_NETWORK, WORKOUT_VIEW_FUTURE, WORKOUT_VIEW_CLEAR, WORKOUT_VIEW_AI,
     WORKOUT_VIEW_SETUP, WORKOUT_VIEW_WIFI, WORKOUT_VIEW_SERVER, WORKOUT_VIEW_CONNECTION,
     WORKOUT_VIEW_CODEX, WORKOUT_VIEW_CODEX_DETAILS,
+    WORKOUT_VIEW_CALENDAR, WORKOUT_VIEW_ALMANAC,
 } workout_view_t;
+
+#define WORKOUT_MENU_COUNT 6
 
 typedef enum {
     WORKOUT_INPUT_UP, WORKOUT_INPUT_DOWN, WORKOUT_INPUT_OK,
@@ -74,6 +78,9 @@ typedef struct {
     bool ai_weekly;
     unsigned wifi_count, server_count;
     unsigned codex_count, codex_selection;
+    unsigned home_focus;
+    bool clock_valid;
+    int32_t today, calendar_day;
 } workout_navigation_t;
 
 uint32_t workout_checksum(const void *bytes, size_t size);
@@ -87,3 +94,4 @@ bool workout_parse_date(const char *date, int64_t *days);
 bool workout_parse_timestamp(const char *timestamp, int64_t *seconds);
 unsigned workout_progress(uint32_t distance, uint32_t goal, unsigned segments);
 workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t input);
+workout_view_t workout_menu_view(unsigned selection);

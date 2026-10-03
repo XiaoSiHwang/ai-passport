@@ -17,6 +17,8 @@ static bool s_http_monitor;
 static bool s_monitor_http;
 static int s_monitor_code;
 static unsigned s_legacy_delay;
+static unsigned s_sntp_calls;
+static esp_err_t s_sntp_result;
 static codex_tasks_data_t s_wire_tasks;
 static codex_alert_page_t s_wire_alerts;
 
@@ -107,7 +109,11 @@ int esp_http_client_get_status_code(esp_http_client_handle_t client) {
 }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client) { (void)client; return ESP_OK; }
 esp_err_t esp_crt_bundle_attach(void *config) { (void)config; return ESP_OK; }
-esp_err_t esp_netif_sntp_init(const esp_sntp_config_t *config) { (void)config; return ESP_OK; }
+esp_err_t esp_netif_sntp_init(const esp_sntp_config_t *config) {
+    assert(strcmp(config->server, "pool.ntp.org") == 0);
+    s_sntp_calls++;
+    return s_sntp_result;
+}
 esp_err_t esp_netif_sntp_sync_wait(unsigned timeout) { (void)timeout; return ESP_OK; }
 esp_err_t workout_portal_start(void) { return ESP_OK; }
 void workout_portal_stop(void) {}
@@ -170,6 +176,7 @@ static void fixture(void) {
     s_write_failure = s_queue_failure = s_association = false;
     s_clock = s_connect_calls = s_write_calls = 0;
     s_monitor_http = false; s_monitor_code = 200; s_legacy_delay = 0;
+    s_time_started = false; s_sntp_calls = 0; s_sntp_result = ESP_OK;
     memset(&s_wire_tasks, 0, sizeof(s_wire_tasks)); memset(&s_wire_alerts, 0, sizeof(s_wire_alerts));
     workout_cache_t cache = {0};
     assert(workout_network_start(&config, &cache) == ESP_OK);
@@ -363,10 +370,22 @@ static void monitoring_slow_legacy(void) {
     assert(updates >= 3 && s_next_quota[0] && s_next_quota[1]);
 }
 
+static void home_clock_sync(void) {
+    fixture();
+    got_ip("Home"); network_tick();
+    assert(s_time_started && s_sntp_calls == 1); /* HTTP-configured devices start background SNTP. */
+    network_tick(); assert(https_clock() && s_sntp_calls == 1);
+    fixture(); s_sntp_result = ESP_FAIL;
+    assert(https_clock() && !s_time_started && s_sntp_calls == 1); /* Failed SNTP must not block HTTP data. */
+    s_sntp_result = ESP_OK;
+    assert(https_clock() && s_time_started && s_sntp_calls == 2);
+}
+
 int main(void) {
     automatic_fallback(); manual_wifi(); server_switch(); cooldown_and_setup(); automatic_storage_retry();
     monitoring_replay(); monitoring_backpressure(); monitoring_source_and_expiry();
     monitoring_slow_legacy();
+    home_clock_sync();
     vQueueDelete(s_commands); vQueueDelete(s_updates); vQueueDelete(s_quota_updates); vEventGroupDelete(s_events);
     vQueueDelete(s_codex_updates); vQueueDelete(s_codex_alerts);
     puts("Workout worker network fault injection: PASS");

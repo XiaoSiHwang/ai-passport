@@ -2,7 +2,7 @@
 
 # Workout dashboard
 
-This application boots directly into its own 240 × 320 mosaic dashboard. It
+This application boots into its own 240 × 320 clock and calendar home screen. It
 reuses the BSP, not the hardware-test menu or demo visual shell. The unchanged
 default 8 MB partition layout stores network settings and one verified workout
 snapshot and independent AI snapshots in NVS; no filesystem partition is needed.
@@ -15,9 +15,11 @@ the firmware palette.
 
 | Page | Up / Down | OK | Long OK |
 | --- | --- | --- | --- |
-| Dashboard / details | Switch week and month | Open / close details | Page menu |
+| Home | Select calendar, Codex quota or GLM quota | Open month calendar or selected quota | Page menu |
+| Month calendar / almanac | Previous / next day | Switch calendar / almanac | Page menu |
+| Workout dashboard / details | Switch week and month | Open / close details | Page menu |
 | AI usage | Switch Codex / GLM; return to five hours | Switch five hours / seven days | Page menu |
-| Page menu | Select an entry | Enter the selected page | Dashboard |
+| Page menu | Select an entry | Enter the selected page | Home |
 | Network and interface | Select Wi-Fi, server or add configuration | Open selection/setup | Page menu |
 | Wi-Fi / server list | Select a saved entry; three rows per page | Switch selection; an empty list opens setup | Network and interface |
 | Connection status | Select reconnect/sync or add configuration | Run the selected action | Network and interface |
@@ -25,8 +27,9 @@ the firmware palette.
 | Codex tasks / details | Switch the three returned tasks | Open / close details; retry a failed sync | Page menu |
 | Approval reminder | No page action | Dismiss locally | Dismiss locally |
 
-The menu contains the dashboard, AI usage, network configuration, manual synchronization,
-and Codex tasks. Long Down on the network page opens a
+The menu order is home, workout dashboard, AI usage, Codex tasks, manual synchronization,
+and settings. Settings opens the network/interface hub; manual sync returns to home.
+Long Down on the network page opens a
 confirmation to clear all saved Wi-Fi networks and server addresses. OK confirms;
 Up/Down cancels and closes provisioning. Long Down is also available on the setup page.
 Clearing network configuration retains the workout and AI snapshots.
@@ -36,6 +39,46 @@ brightness drops to 20% after 30 seconds and turns off after 60 seconds. The
 first key wakes the screen without executing an action. Wi-Fi modem power saving
 and automatic light sleep are enabled; actual board power and USB behavior need
 device measurement. Audio and Bluetooth services are not started.
+
+## Clock, calendar and almanac
+
+Home shows time, Gregorian date/weekday, Chinese lunar date, festival/holiday
+labels, auspicious-day classification and short suitable/unsuitable activity
+excerpts. It has no running-distance summary. The two five-hour AI quota values
+remain below: unavailable is `--`, exhausted is `0%`, and retained values are
+labeled cached. The month calendar displays lunar days, festivals/solar terms,
+holidays and adjusted workdays. Up/Down moves one day across month/year boundaries;
+OK opens or closes the selected day's almanac. Almanac lists show up to six
+activities with ellipses for longer lists and an explicit folk-reference/excerpt label.
+
+Time uses China standard time (UTC+8), independently of API timestamp offsets.
+After obtaining an IP address, the network worker starts background SNTP through
+`pool.ntp.org` for HTTP and HTTPS configurations. Failed clock sync does not block
+HTTP data; HTTPS retains its certificate-time requirement. Until a plausible clock
+is available, home displays unknown time and calibration labels. Minute/date
+changes refresh without an API snapshot. Midnight updates home while retaining
+a date being inspected; re-entering the calendar selects the new current day.
+Once synchronized, the clock and calendar continue offline. A cold power cycle
+requires synchronization again. The backlight policy remains unchanged.
+
+Read-only calendar data covers 2000–2099 in Flash, without daily network requests
+or NVS writes. Lunar dates, solar terms, deities and activity lists are generated
+from [lunar-javascript 1.7.7](https://github.com/6tail/lunar-javascript), under its
+[MIT license](../../main/passport_calendar_license.txt). Classification follows
+the library's midnight day convention and is traditional folk reference.
+Annual holidays and adjusted workdays are supplied only for 2026, according to the
+[State Council arrangements](https://zwfw.gansu.gov.cn/huixian/zczx/tzgg/art/2025/art_715c16a75e4d4c289c295e77772c7274.html).
+Other years show fixed/lunar festivals and solar terms without guessing statutory
+adjustments. Updating annual arrangements requires a firmware update.
+
+Regenerate the calendar before the font inventory. The generator verifies the
+pinned source SHA-256 and deduplicates activity strings:
+
+```text
+curl -fL https://cdn.jsdelivr.net/npm/lunar-javascript@1.7.7/lunar.js -o /tmp/passport-lunar.js
+node tools/generate_passport_calendar.js /tmp/passport-lunar.js
+python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --converter <lv_font_conv.js>
+```
 
 ## Configure Wi-Fi and the interface
 
@@ -143,15 +186,15 @@ snapshot until the new source succeeds; clearing network settings keeps it.
 
 Fixed Chinese UI text uses the verified inventory, including punctuation. Labels
 explicitly select 12/16/20 px subset fonts; large numbers use an original 35 px
-pixel font. Dynamic names use a separate 16 px font stored in Flash with explicit
+pixel font; the clock uses 50 px Noto Sans digits. Dynamic names use a separate 16 px font stored in Flash with explicit
 Unicode-code fallback. See the [font assets](../../assets/README.md).
 
 ## AI usage
 
 The focused page shows remaining and used quota, a 20-block remaining-quota meter,
 reset time with its API time-zone offset, and the last successful fetch time.
-Up/Down switches Codex/GLM; OK switches five hours/seven days. Boot still opens
-the workout dashboard; enter AI usage from the menu. No computer-resource page
+Up/Down switches Codex/GLM; OK switches five hours/seven days. Enter AI usage
+from its home summary or the menu. No computer-resource page
 or `/api/system` request is included.
 
 The existing stored `/api/workout` URL remains unchanged. Replace only that suffix
@@ -183,8 +226,7 @@ task at a time: project, title, status, current step, recorded elapsed time,
 last successful fetch and position. Up/Down switches tasks; OK opens details.
 Selection follows the task ID when backend priority ordering changes. The
 backend returns at most three tasks; details report the omitted count. A title
-that exceeds four detail lines scrolls in full. Boot still opens the workout
-dashboard.
+that exceeds four detail lines scrolls in full. Boot opens the clock/calendar home.
 
 The saved workout URL derives `/api/codex/tasks` and `/api/codex/alerts`, preserving
 its origin and reverse-proxy prefix. Both poll every five seconds with a three-second
@@ -256,6 +298,14 @@ including repeated page/QR cleanup with a 24 KB LVGL pool. These are software
 checks; they do not establish board timing, Wi-Fi range, power consumption or
 physical display quality.
 
+Calendar checks cover all supported Gregorian dates, leap months, solar terms,
+festival/holiday/workday boundaries, auspicious and non-auspicious dates, UTC+8
+midnight, unknown clocks, navigation bounds and HTTP background clock startup.
+LVGL renders cover home, lunar dates, holidays, six-week months, almanac excerpts,
+missing/exhausted quotas and minute changes. Repeated calendar/page transitions
+retain the 24 KB pool without growth. Device checks must verify actual SNTP,
+midnight, offline timing, Chinese glyphs, rounded corners and physical keys.
+
 The gate also covers history bounds/deduplication/migration, independent selections,
 failed commits, retry/cooldown timing, UTF-8 decoding, and fault injection against
 the real worker for stale DHCP/disconnect events, manual recovery, lost IP, setup
@@ -269,7 +319,7 @@ The gate also covers quota URL derivation, CRC/provider isolation, failed commit
 actual cJSON decoding, and LVGL rendering of both providers, weekly windows,
 exhausted/missing quota, unknown resets, offline data and unavailable providers.
 Device acceptance must exercise those states, provider/period navigation, the
-five-item menu, real API responses, offline restart and interrupted writes. Inspect
+six-item menu, real API responses, offline restart and interrupted writes. Inspect
 Chinese glyphs and heap/stack behavior during repeated requests and provisioning.
 
 Codex checks cover actual backend response fixtures, malformed/duplicate fields,

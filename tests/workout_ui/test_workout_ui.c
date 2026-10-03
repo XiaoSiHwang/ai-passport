@@ -9,6 +9,7 @@ LV_FONT_DECLARE(workout_font_12);
 LV_FONT_DECLARE(workout_font_16);
 LV_FONT_DECLARE(workout_font_20);
 LV_FONT_DECLARE(workout_digits_35);
+LV_FONT_DECLARE(workout_clock_50);
 LV_FONT_DECLARE(workout_network_font_16);
 LV_FONT_DECLARE(workout_monitor_font_12);
 static uint16_t s_frame[240 * 320], s_buffer[240 * 20];
@@ -72,6 +73,58 @@ static void quota_screens(workout_ui_state_t *state) {
     state->quota.providers[1].available = false; state->quota.providers[1].http_status = 503;
     state->network.online = true;
     workout_ui_update(state); screenshot("quota-unavailable.ppm");
+}
+
+static void calendar_time(workout_ui_state_t *state, const char *timestamp) {
+    int64_t seconds;
+    assert(workout_parse_timestamp(timestamp, &seconds));
+    assert(passport_calendar_clock(seconds, &state->clock));
+    state->navigation.clock_valid = true;
+    state->navigation.today = state->navigation.calendar_day = state->clock.day;
+}
+
+static uint32_t clock_pixels(void) {
+    uint32_t hash = 2166136261u;
+    for (unsigned y = 34; y < 90; y++)
+        for (unsigned x = 20; x < 220; x++) hash = (hash ^ s_frame[y * 240 + x]) * 16777619u;
+    return hash;
+}
+
+static void home_screens(workout_ui_state_t *state) {
+    state->navigation.view = WORKOUT_VIEW_HOME;
+    state->clock = (passport_clock_t){0};
+    workout_ui_update(state); screenshot("home-uncalibrated.ppm");
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        state->quota.providers[i].available = true;
+        state->quota.providers[i].data.windows[0] = (ai_quota_window_t){.available = true, .remaining = i ? 860 : 725};
+    }
+    calendar_time(state, "2026-10-03T09:41:00+08:00");
+    workout_ui_update(state); screenshot("home-national-day.ppm");
+    uint32_t before = clock_pixels(); state->clock.minute++;
+    workout_ui_update(state); screenshot("home-next-minute.ppm");
+    assert(before != clock_pixels());
+    state->navigation.home_focus = 1;
+    workout_ui_update(state); screenshot("home-ai-focus.ppm");
+    state->navigation.home_focus = 0;
+    calendar_time(state, "2026-09-25T09:41:00+08:00");
+    workout_ui_update(state); screenshot("home-mid-autumn.ppm");
+    calendar_time(state, "2026-10-10T09:41:00+08:00");
+    workout_ui_update(state); screenshot("home-auspicious.ppm");
+    state->navigation.view = WORKOUT_VIEW_ALMANAC;
+    workout_ui_update(state); screenshot("almanac-auspicious.ppm");
+    state->navigation.view = WORKOUT_VIEW_CALENDAR;
+    workout_ui_update(state); screenshot("calendar-october.ppm");
+    calendar_time(state, "2026-08-01T09:41:00+08:00");
+    workout_ui_update(state); screenshot("calendar-six-weeks.ppm");
+    state->navigation.view = WORKOUT_VIEW_HOME;
+    calendar_time(state, "2026-10-12T09:41:00+08:00");
+    workout_ui_update(state); screenshot("home-ordinary.ppm");
+    calendar_time(state, "2025-07-25T09:41:00+08:00");
+    workout_ui_update(state); screenshot("home-leap-month.ppm");
+    state->network.online = false; state->quota.providers[0].data.windows[0].remaining = 0;
+    state->quota.providers[1].data.windows[0].available = false;
+    workout_ui_update(state); screenshot("home-offline-quota-unknown.ppm");
+    state->network.online = true; state->navigation.view = WORKOUT_VIEW_DASHBOARD;
 }
 
 static void connectivity_screens(workout_ui_state_t *state) {
@@ -241,7 +294,7 @@ int main(void) {
         lv_font_glyph_dsc_t glyph = {0};
         assert(!lv_font_get_glyph_dsc(fonts[i], &glyph, 0x9F98, 0) || glyph.is_placeholder);
     }
-    workout_ui_state_t state = {.battery = 82, .has_data = true};
+    workout_ui_state_t state = {.battery = 82, .has_data = true, .navigation.view = WORKOUT_VIEW_DASHBOARD};
     state.network.online = true;
     state.data.year = 2026; state.data.month = 10; state.data.week_count = 5;
     strcpy(state.data.week_start, "2026-09-28"); strcpy(state.data.week_end, "2026-10-04");
@@ -249,6 +302,7 @@ int main(void) {
     state.data.weekly = (workout_summary_t){246,9028,367,300};
     state.data.monthly = (workout_summary_t){140,5151,367,1000};
     state.data.days[0] = 52; state.data.days[2] = 54; state.data.days[4] = 140;
+    home_screens(&state);
     workout_ui_update(&state); screenshot("dashboard.ppm");
     state.from_cache = true; state.network.online = false;
     workout_ui_update(&state); screenshot("offline.ppm");
@@ -270,6 +324,12 @@ int main(void) {
     lv_mem_monitor_t before, after;
     lv_mem_monitor(&before);
     for (unsigned i = 0; i < 30; i++) {
+        state.navigation.view = WORKOUT_VIEW_HOME;
+        workout_ui_update(&state); lv_refr_now(NULL);
+        state.navigation.view = WORKOUT_VIEW_CALENDAR;
+        workout_ui_update(&state); lv_refr_now(NULL);
+        state.navigation.view = WORKOUT_VIEW_ALMANAC;
+        workout_ui_update(&state); lv_refr_now(NULL);
         state.network.setup_active = true;
         state.navigation.view = WORKOUT_VIEW_SETUP;
         state.navigation.setup_step = i % 2;

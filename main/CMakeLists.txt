@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "main.c"
          "workout_model.c"
+         "passport_calendar.c"
          "workout_profiles.c"
          "ai_quota.c"
          "codex_monitor.c"
@@ -13,6 +14,7 @@ idf_component_register(
          "../assets/fonts/workout_font_16.c"
          "../assets/fonts/workout_font_20.c"
          "../assets/fonts/workout_digits_35.c"
+         "../assets/fonts/workout_clock_50.c"
          "../assets/fonts/workout_network_font_16.c"
          "../assets/fonts/workout_monitor_font_12.c"
     INCLUDE_DIRS "." "../assets/fonts"

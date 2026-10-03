@@ -16,6 +16,7 @@ typedef struct {
     bool from_cache;
     bool request_failed;
     int battery;
+    passport_clock_t clock;
 } workout_ui_state_t;
 
 /* All calls require the LVGL lock; one screen, owned for the app lifetime. */

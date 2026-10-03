@@ -39,12 +39,17 @@ run_static_checks() {
         -o "${test_dir}/test_workout_model"
     "${test_dir}/test_workout_model"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_passport_calendar.c main/passport_calendar.c main/workout_model.c \
+        -o "${test_dir}/test_passport_calendar"
+    "${test_dir}/test_passport_calendar"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_codex_monitor.c main/codex_monitor.c main/workout_model.c \
         -o "${test_dir}/test_codex_monitor"
     "${test_dir}/test_codex_monitor"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -Itests/codex_stubs -Itests/network_stubs -Itests/workout_stubs -Imain \
         tests/test_codex_app.c main/codex_monitor.c main/workout_model.c "${gc_flag}" \
+        main/passport_calendar.c \
         -o "${test_dir}/test_codex_app"
     "${test_dir}/test_codex_app"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \

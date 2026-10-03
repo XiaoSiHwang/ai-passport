@@ -24,7 +24,8 @@ DIGITS = [
 
 
 def symbols() -> str:
-    text = (ROOT / "main" / "workout_ui.c").read_text(encoding="utf-8")
+    text = "".join((ROOT / "main" / name).read_text(encoding="utf-8")
+                   for name in ("workout_ui.c", "passport_calendar.c", "passport_calendar_data.inc"))
     chinese = {char for char in text if ord(char) > 126 and char.isprintable()}
     return "".join(chr(value) for value in range(32, 127)) + "".join(sorted(chinese))
 
@@ -100,6 +101,14 @@ def main() -> None:
     header = "#pragma once\n#include <stdint.h>\nstatic const uint32_t workout_font_codepoints[] = {" + array + "};\n"
     (OUTPUT / "workout_font_inventory.h").write_text(header, encoding="utf-8")
     pixel_font()
+    destination = OUTPUT / "workout_clock_50.c"
+    subprocess.run(["node", str(args.converter), "--font", str(args.font), "--symbols", "0123456789:-",
+                    "--size", "50", "--bpp", "2", "--format", "lvgl", "--no-compress", "--no-kerning",
+                    "--lv-include", "lvgl.h", "--lv-font-name", "workout_clock_50",
+                    "--output", str(destination)], check=True)
+    source = destination.read_text(encoding="utf-8")
+    source = re.sub(r" \* Opts:.*\n", " * Generated with lv_font_conv 1.5.3; see tools/generate_workout_fonts.py.\n", source)
+    destination.write_text("/* Noto Sans CJK SC clock digits; SIL OFL 1.1, see NotoSansCJKsc-OFL.txt. */\n" + source.rstrip() + "\n", encoding="utf-8")
     if args.network_font:
         network_font(args.font, args.converter)
     if args.monitor_font:

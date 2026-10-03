@@ -390,13 +390,17 @@ static esp_err_t http_event(esp_http_client_event_t *event) {
     return ESP_OK;
 }
 
-static bool https_clock(void) {
-    if (strncmp(s_config.server, "https://", 8) != 0 || time(NULL) >= 1704067200) return true;
+static void start_clock(void) {
     if (!s_time_started) {
         const esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-        if (esp_netif_sntp_init(&config) != ESP_OK) return false;
-        s_time_started = true;
+        s_time_started = esp_netif_sntp_init(&config) == ESP_OK;
     }
+}
+
+static bool https_clock(void) {
+    start_clock(); /* HTTP installations also need the home-screen wall clock. */
+    if (strncmp(s_config.server, "https://", 8) != 0 || time(NULL) >= 1704067200) return true;
+    if (!s_time_started) return false;
     return esp_netif_sntp_sync_wait(pdMS_TO_TICKS(5000)) == ESP_OK;
 }
 
@@ -843,6 +847,7 @@ static void network_tick(void) {
     EventBits_t bits = xEventGroupGetBits(s_events);
     if (bits & JUST_CONNECTED_BIT) {
         xEventGroupClearBits(s_events, JUST_CONNECTED_BIT);
+        start_clock();
         s_next_sync = 0;
         for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) s_next_quota[i] = 0;
         s_next_codex_tasks = s_next_codex_alerts = 0;

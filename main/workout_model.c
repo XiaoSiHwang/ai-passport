@@ -210,15 +210,59 @@ static workout_action_t profiles_navigate(workout_navigation_t *nav, workout_inp
     return WORKOUT_ACTION_SWITCH_WIFI;
 }
 
+workout_view_t workout_menu_view(unsigned selection) {
+    static const workout_view_t views[] = {WORKOUT_VIEW_HOME, WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_AI,
+        WORKOUT_VIEW_CODEX, WORKOUT_VIEW_HOME, WORKOUT_VIEW_NETWORK};
+    return views[selection % WORKOUT_MENU_COUNT];
+}
+
 static workout_action_t menu_navigate(workout_navigation_t *nav, workout_input_t input) {
-    if (input == WORKOUT_INPUT_UP) nav->selection = (nav->selection + 4) % 5;
-    if (input == WORKOUT_INPUT_DOWN) nav->selection = (nav->selection + 1) % 5;
+    if (input == WORKOUT_INPUT_UP) nav->selection = (nav->selection + WORKOUT_MENU_COUNT - 1) % WORKOUT_MENU_COUNT;
+    if (input == WORKOUT_INPUT_DOWN) nav->selection = (nav->selection + 1) % WORKOUT_MENU_COUNT;
     if (input != WORKOUT_INPUT_OK) return WORKOUT_ACTION_NONE;
-    nav->view = nav->selection == 1 ? WORKOUT_VIEW_AI : nav->selection == 2 ? WORKOUT_VIEW_NETWORK
-              : nav->selection == 4 ? WORKOUT_VIEW_CODEX : WORKOUT_VIEW_DASHBOARD;
-    bool sync = nav->selection == 3;
+    nav->view = workout_menu_view(nav->selection);
+    bool sync = nav->selection == 4;
     nav->selection = 0;
     return sync ? WORKOUT_ACTION_SYNC : WORKOUT_ACTION_NONE;
+}
+
+static workout_action_t open_menu(workout_navigation_t *nav) {
+    bool setup = nav->view == WORKOUT_VIEW_SETUP || nav->view == WORKOUT_VIEW_CLEAR;
+    bool profiles = setup || nav->view == WORKOUT_VIEW_WIFI || nav->view == WORKOUT_VIEW_SERVER
+                    || nav->view == WORKOUT_VIEW_CONNECTION;
+    workout_view_t previous = nav->view == WORKOUT_VIEW_DETAILS ? WORKOUT_VIEW_DASHBOARD
+        : nav->view == WORKOUT_VIEW_CODEX_DETAILS ? WORKOUT_VIEW_CODEX : nav->view;
+    nav->view = profiles ? WORKOUT_VIEW_NETWORK
+              : nav->view == WORKOUT_VIEW_MENU ? WORKOUT_VIEW_HOME : WORKOUT_VIEW_MENU;
+    nav->selection = 0;
+    if (nav->view == WORKOUT_VIEW_MENU) {
+        for (unsigned i = 0; i < WORKOUT_MENU_COUNT; i++) {
+            if (workout_menu_view(i) == previous) {nav->selection = i; break;}
+        }
+    }
+    return setup ? WORKOUT_ACTION_SETUP_STOP : WORKOUT_ACTION_NONE;
+}
+
+static void home_navigate(workout_navigation_t *nav, workout_input_t input) {
+    if (input == WORKOUT_INPUT_UP) nav->home_focus = (nav->home_focus + 2) % 3;
+    if (input == WORKOUT_INPUT_DOWN) nav->home_focus = (nav->home_focus + 1) % 3;
+    if (input != WORKOUT_INPUT_OK) return;
+    if (nav->home_focus) {
+        nav->view = WORKOUT_VIEW_AI;
+        nav->ai_provider = nav->home_focus == 2;
+        nav->ai_weekly = false;
+    } else if (nav->clock_valid) {
+        nav->view = WORKOUT_VIEW_CALENDAR;
+        nav->calendar_day = nav->today;
+    }
+}
+
+static void calendar_navigate(workout_navigation_t *nav, workout_input_t input) {
+    if (!nav->clock_valid) return;
+    if (input == WORKOUT_INPUT_UP && nav->calendar_day > PASSPORT_CALENDAR_FIRST_DAY) nav->calendar_day--;
+    if (input == WORKOUT_INPUT_DOWN && nav->calendar_day < PASSPORT_CALENDAR_LAST_DAY) nav->calendar_day++;
+    if (input == WORKOUT_INPUT_OK) nav->view = nav->view == WORKOUT_VIEW_CALENDAR
+        ? WORKOUT_VIEW_ALMANAC : WORKOUT_VIEW_CALENDAR;
 }
 
 static void codex_navigate(workout_navigation_t *nav, workout_input_t input) {
@@ -232,13 +276,7 @@ static void codex_navigate(workout_navigation_t *nav, workout_input_t input) {
 
 workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t input) {
     if (input == WORKOUT_INPUT_MENU) {
-        bool setup = nav->view == WORKOUT_VIEW_SETUP || nav->view == WORKOUT_VIEW_CLEAR;
-        bool profiles = setup || nav->view == WORKOUT_VIEW_WIFI || nav->view == WORKOUT_VIEW_SERVER
-                        || nav->view == WORKOUT_VIEW_CONNECTION;
-        nav->view = profiles ? WORKOUT_VIEW_NETWORK
-                  : nav->view == WORKOUT_VIEW_MENU ? WORKOUT_VIEW_DASHBOARD : WORKOUT_VIEW_MENU;
-        nav->selection = 0;
-        return setup ? WORKOUT_ACTION_SETUP_STOP : WORKOUT_ACTION_NONE;
+        return open_menu(nav);
     }
     if (nav->view == WORKOUT_VIEW_CLEAR) {
         nav->view = input == WORKOUT_INPUT_OK ? WORKOUT_VIEW_SETUP : WORKOUT_VIEW_NETWORK;
@@ -249,7 +287,9 @@ workout_action_t workout_navigate(workout_navigation_t *nav, workout_input_t inp
     if (nav->view == WORKOUT_VIEW_NETWORK || nav->view == WORKOUT_VIEW_WIFI
         || nav->view == WORKOUT_VIEW_SERVER || nav->view == WORKOUT_VIEW_CONNECTION)
         return profiles_navigate(nav, input);
-    if (nav->view == WORKOUT_VIEW_CODEX || nav->view == WORKOUT_VIEW_CODEX_DETAILS) {
+    if (nav->view == WORKOUT_VIEW_HOME) home_navigate(nav, input);
+    else if (nav->view == WORKOUT_VIEW_CALENDAR || nav->view == WORKOUT_VIEW_ALMANAC) calendar_navigate(nav, input);
+    else if (nav->view == WORKOUT_VIEW_CODEX || nav->view == WORKOUT_VIEW_CODEX_DETAILS) {
         codex_navigate(nav, input);
     } else if (nav->view == WORKOUT_VIEW_AI) {
         if (input == WORKOUT_INPUT_UP || input == WORKOUT_INPUT_DOWN) {

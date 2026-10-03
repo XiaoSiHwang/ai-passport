@@ -50,6 +50,10 @@ class FontCoverageTest(unittest.TestCase):
         codepoints = coverage(ROOT / "assets/fonts/workout_digits_35.c")
         self.assertEqual(codepoints, set(map(ord, "0123456789.:")))
 
+    def test_clock_digits(self):
+        codepoints = coverage(ROOT / "assets/fonts/workout_clock_50.c")
+        self.assertEqual(codepoints, set(map(ord, "0123456789:-")))
+
     def test_dynamic_network_font(self):
         codepoints = coverage(ROOT / "assets/fonts/workout_network_font_16.c")
         self.assertTrue(set(range(32, 127)) <= codepoints)

@@ -11,6 +11,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <time.h>
 
 static const char *TAG = "workout";
 static QueueHandle_t s_input;
@@ -44,6 +45,8 @@ static void navigate_input(workout_input_t input) {
     if (s_state.network.profile_busy && input == WORKOUT_INPUT_OK
         && s_state.navigation.view != WORKOUT_VIEW_DASHBOARD && s_state.navigation.view != WORKOUT_VIEW_AI
         && s_state.navigation.view != WORKOUT_VIEW_CODEX && s_state.navigation.view != WORKOUT_VIEW_CODEX_DETAILS
+        && s_state.navigation.view != WORKOUT_VIEW_HOME && s_state.navigation.view != WORKOUT_VIEW_CALENDAR
+        && s_state.navigation.view != WORKOUT_VIEW_ALMANAC
         && s_state.navigation.view != WORKOUT_VIEW_DETAILS && s_state.navigation.view != WORKOUT_VIEW_MENU) {
         s_state.request_failed = true;
         refresh();
@@ -174,10 +177,21 @@ static void start_network(void) {
     memset(&config, 0, sizeof(config));
 }
 
+static void update_clock(void) {
+    passport_clock_t clock;
+    (void)passport_calendar_clock((int64_t)time(NULL), &clock);
+    if (memcmp(&clock, &s_state.clock, sizeof(clock)) == 0) return;
+    s_state.clock = clock;
+    s_state.navigation.clock_valid = clock.valid;
+    s_state.navigation.today = clock.day;
+    refresh();
+}
+
 static void app_loop(void) {
     int64_t next_battery = 0, next_codex_frame = 0;
     for (;;) {
         workout_input_t input;
+        update_clock();
         if (xQueueReceive(s_input, &input, pdMS_TO_TICKS(100)) == pdTRUE) handle_input(input);
         s_state.now_ms = esp_timer_get_time() / 1000;
         update_network();

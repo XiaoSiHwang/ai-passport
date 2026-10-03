@@ -46,6 +46,12 @@ python3 tools/generate_workout_fonts.py --font <NotoSansCJKsc-Regular.otf> --con
 增加 `--network-font` 参数可以同时重新生成动态网络字体。
 增加 `--monitor-font` 参数可以同时重新生成 12 px 动态监控字体。
 
+首页时钟使用 `fonts/workout_clock_50.c`：相同 OFL 许可证下的 Noto Sans CJK SC
+数字子集，包含 `0`–`9`、冒号和短横线，为未压缩 2 bpp、50 px。上面的命令同时
+生成此字体，通过 `main/CMakeLists.txt` 编译。固定 12 / 16 / 20 px 字符集现在
+还收集日历格式化代码和生成的农历 / 黄历文案，共 576 个码点。先生成日历数据，
+再更新字体。静态 cmap 检查覆盖时钟和日历字符集，主机 LVGL 渲染验证实际选用字体。
+
 脚本收集界面字符（包括标点），选择 12 / 16 / 20 px、2 bpp、不压缩、无字距调整。同时生成
 `fonts/workout_digits_35.c`，它是按仓库 MIT 许可证提供的原创 1 bpp、35 px 像素
 数字字体，包含用于时长的冒号；5×7 数字图案在脚本中维护。新增中文文案后重新生成，

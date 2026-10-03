@@ -10,6 +10,7 @@ LV_FONT_DECLARE(workout_font_12);
 LV_FONT_DECLARE(workout_font_16);
 LV_FONT_DECLARE(workout_font_20);
 LV_FONT_DECLARE(workout_digits_35);
+LV_FONT_DECLARE(workout_clock_50);
 LV_FONT_DECLARE(workout_network_font_16);
 LV_FONT_DECLARE(workout_monitor_font_12);
 
@@ -73,6 +74,11 @@ static const char *network_label(void) {
     if (s_state.network.setup_active) return "配网";
     if (s_state.network.profile_busy) return "切换中";
     if (s_state.network.connecting) return "换网中";
+    if (s_state.navigation.view == WORKOUT_VIEW_HOME || s_state.navigation.view == WORKOUT_VIEW_CALENDAR
+        || s_state.navigation.view == WORKOUT_VIEW_ALMANAC) {
+        if (!s_state.network.online) return "离线";
+        return s_state.clock.valid ? "Wi-Fi" : "校时中";
+    }
     if (s_state.navigation.view == WORKOUT_VIEW_CODEX || s_state.navigation.view == WORKOUT_VIEW_CODEX_DETAILS) {
         if (!s_state.network.online) return "离线";
         if (s_state.codex.failed) return "同步失败";
@@ -217,14 +223,15 @@ static void details(lv_layer_t *layer) {
 }
 
 static void menu(lv_layer_t *layer) {
-    title(layer, "页面");
-    small(layer, "选择一个页面", 20, 65, 180);
-    static const char *entries[] = {"运动看板", "AI 用量", "网络与接口", "立即同步", "Codex 任务"};
-    for (unsigned i = 0; i < 5; i++) {
+    title(layer, "功能菜单");
+    static const char *entries[] = {"默认首页", "运动看板", "AI 用量", "Codex 任务", "立即同步", "设置"};
+    for (unsigned i = 0; i < WORKOUT_MENU_COUNT; i++) {
         bool selected = i == s_state.navigation.selection;
-        rectangle(layer, 20, 86 + (int)i * 36, 200, 30, selected ? UI_ACCENT : UI_PANEL);
-        label(layer, entries[i], 32, 93 + (int)i * 36, 170, &workout_font_16,
+        int y = 76 + (int)i * 34 + (i == WORKOUT_MENU_COUNT - 1 ? 10 : 0);
+        rectangle(layer, 20, y, 200, 30, selected ? UI_ACCENT : UI_PANEL);
+        label(layer, entries[i], 32, y + 5, 164, &workout_font_16,
               selected ? UI_BACKGROUND : UI_INK);
+        if (selected) label(layer, "›", 202, y + 6, 12, &workout_font_16, UI_BACKGROUND);
     }
     hint(layer, "上下 选择  确定 进入");
 }
@@ -332,6 +339,177 @@ static void codex_block(lv_layer_t *layer, const char *value, int x, int y, int 
     descriptor.line_space = 2;
     const lv_area_t area = {.x1 = x, .y1 = y, .x2 = x + width - 1, .y2 = y + height - 1};
     lv_draw_label(layer, &descriptor, &area);
+}
+
+static void centered(lv_layer_t *layer, const char *text, int x, int y, int width,
+                     const lv_font_t *font, uint32_t color) {
+    lv_point_t extent;
+    lv_text_get_size(&extent, text, font, 0, 0, width, LV_TEXT_FLAG_NONE);
+    label(layer, text, x + (width - extent.x) / 2, y, extent.x, font, color);
+}
+
+static void rounded(lv_layer_t *layer, int x, int y, int width, int height, int radius, uint32_t color) {
+    lv_draw_rect_dsc_t descriptor;
+    lv_draw_rect_dsc_init(&descriptor);
+    descriptor.bg_color = lv_color_hex(color);
+    descriptor.bg_opa = LV_OPA_COVER;
+    descriptor.radius = radius;
+    const lv_area_t area = {.x1 = x, .y1 = y, .x2 = x + width - 1, .y2 = y + height - 1};
+    lv_draw_rect(layer, &descriptor, &area);
+}
+
+static void day_quality(lv_layer_t *layer, const passport_calendar_t *calendar, int y, int right) {
+    const char *text = !calendar ? "等待校时" : calendar->auspicious ? "黄道吉日" : "非黄道吉日";
+    bool good = calendar && calendar->auspicious;
+    lv_point_t extent;
+    lv_text_get_size(&extent, text, &workout_font_12, 0, 0, 100, LV_TEXT_FLAG_NONE);
+    int x = right - extent.x - 8;
+    rounded(layer, x, y, extent.x + 8, workout_font_12.line_height + 2, 3, good ? UI_ACCENT : UI_AMBER_BG);
+    label(layer, text, x + 4, y + 1, extent.x, &workout_font_12, good ? UI_BACKGROUND : UI_AMBER);
+}
+
+static void calendar_event_text(const passport_calendar_t *calendar, char value[64]) {
+    if (calendar->holiday) snprintf(value, 64, "%s · 第%u天", calendar->festival, calendar->holiday_day);
+    else if (calendar->festival[0]) snprintf(value, 64, "%s", calendar->festival);
+    else if (calendar->term[0]) snprintf(value, 64, "%s · 节气", calendar->term);
+    else value[0] = 0;
+}
+
+static void calendar_date_text(const passport_calendar_t *calendar, char value[64]) {
+    static const char *const weekdays[] = {"一","二","三","四","五","六","日"};
+    snprintf(value, 64, "%04u.%02u.%02u 周%s", calendar->year, calendar->month, calendar->day, weekdays[calendar->weekday]);
+}
+
+static const char *calendar_excerpt(const char *text, unsigned count, char output[128], bool ellipsis) {
+    const char *end = text;
+    for (unsigned i = 0; i < count && *end; i++) {
+        const char *space = strchr(end, ' ');
+        end = space ? space + 1 : end + strlen(end);
+    }
+    size_t size = (size_t)(end - text);
+    if (*end && size) size--; /* Exclude the trailing word separator. */
+    snprintf(output, 128, "%.*s%s", (int)size, text, *end && ellipsis ? " ..." : "");
+    return end;
+}
+
+static void calendar_rows(lv_layer_t *layer, const passport_calendar_t *calendar, bool detail) {
+    int x = detail ? 20 : 30, width = detail ? 178 : 158;
+    const char *values[] = {calendar ? calendar->yi : "--", calendar ? calendar->ji : "--"};
+    for (unsigned i = 0; i < 2; i++) {
+        int y = detail ? 180 + (int)i * 48 : 198 + (int)i * 22;
+        char text[128];
+        const char *tail = calendar_excerpt(values[i], 3, text, !detail);
+        label(layer, i ? "忌" : "宜", x, y, 16, &workout_font_12, i ? UI_AMBER : UI_ACCENT);
+        codex_block(layer, text, x + 22, y, width, &workout_font_12, 1, UI_INK);
+        if (detail && *tail) {
+            calendar_excerpt(tail, 3, text, true);
+            codex_block(layer, text, x + 22, y + 18, width, &workout_font_12, 1, UI_INK);
+        }
+    }
+}
+
+static void home_quota(lv_layer_t *layer) {
+    bool old = !s_state.network.online;
+    for (unsigned i = 0; i < AI_QUOTA_PROVIDERS; i++) {
+        const ai_quota_state_t *quota = &s_state.quota.providers[i];
+        old = old || quota->from_cache || quota->failed || quota->data.stale;
+        int x = i ? 126 : 20;
+        bool selected = s_state.navigation.home_focus == i + 1;
+        char name[16], value[16];
+        snprintf(name, sizeof(name), "%s%s", selected ? "› " : "", i ? "GLM" : "Codex");
+        label(layer, name, x, 272, 52, &workout_font_12, selected ? UI_ACCENT : UI_INK);
+        const ai_quota_window_t *window = &quota->data.windows[0];
+        if (!quota->available || !window->available) strcpy(value, "--");
+        else if (window->remaining % 10) snprintf(value, sizeof(value), "%u.%u%%", window->remaining / 10, window->remaining % 10);
+        else snprintf(value, sizeof(value), "%u%%", window->remaining / 10);
+        label(layer, value, x + 48, 269, 48, &workout_font_16, UI_INK);
+    }
+    small(layer, old ? "AI 剩余 · 缓存" : "AI 剩余 · 5小时", 20, 252, 144);
+    small(layer, "确定查看", 172, 252, 48);
+}
+
+static void home(lv_layer_t *layer) {
+    passport_calendar_t calendar;
+    bool valid = s_state.clock.valid && passport_calendar_get(s_state.clock.day, &calendar);
+    char value[64];
+    if (valid) snprintf(value, sizeof(value), "%02u:%02u", s_state.clock.hour, s_state.clock.minute);
+    else strcpy(value, "--:--");
+    centered(layer, value, 20, 34, 200, &workout_clock_50, valid ? UI_INK : UI_AMBER);
+    if (valid) calendar_date_text(&calendar, value);
+    else strcpy(value, "日期待校准");
+    centered(layer, value, 20, 93, 200, &workout_font_12, UI_MUTED);
+    if (valid) snprintf(value, sizeof(value), "农历 %s", calendar.lunar);
+    else strcpy(value, "农历待校准");
+    centered(layer, value, 20, 115, 200, &workout_font_16, UI_INK);
+    value[0] = 0;
+    if (valid) calendar_event_text(&calendar, value);
+    if (value[0]) {
+        lv_point_t extent;
+        lv_text_get_size(&extent, value, &workout_font_12, 0, 0, 200, LV_TEXT_FLAG_NONE);
+        rounded(layer, 116 - extent.x / 2, 143, extent.x + 8, 18, 4, UI_PANEL);
+        centered(layer, value, 20, 144, 200, &workout_font_12, UI_ACCENT);
+    }
+    rounded(layer, 20, 167, 200, 78, 8, UI_PANEL);
+    label(layer, s_state.navigation.home_focus ? "黄历·民俗参考" : "› 黄历·民俗参考", 30, 177, 110,
+        &workout_font_12, s_state.navigation.home_focus ? UI_MUTED : UI_ACCENT);
+    day_quality(layer, valid ? &calendar : NULL, 176, 210);
+    calendar_rows(layer, valid ? &calendar : NULL, false);
+    home_quota(layer);
+    hint(layer, s_state.navigation.home_focus ? "上下 选卡 · 确定 额度" : valid ? "上下 选卡 · 确定 月历" : "联网校时后可查看月历");
+}
+
+static void calendar_cell(lv_layer_t *layer, int32_t day, unsigned row, unsigned column) {
+    passport_calendar_t calendar;
+    if (!passport_calendar_get(day, &calendar)) return;
+    int x = 22 + (int)column * 28, y = 104 + (int)row * 26;
+    bool selected = day == s_state.navigation.calendar_day;
+    if (selected) rounded(layer, x, y, 26, 26, 4, UI_ACCENT);
+    else if (day == s_state.clock.day) rounded(layer, x, y, 26, 26, 4, UI_PANEL);
+    uint32_t color = selected ? UI_BACKGROUND : UI_INK;
+    char number[8];
+    snprintf(number, sizeof(number), "%u", calendar.day);
+    centered(layer, number, x, y, 26, &workout_font_12, color);
+    const char *note = calendar.holiday ? "休" : calendar.workday ? "班" : calendar.festival[0] ? "节"
+        : calendar.term[0] ? calendar.term : passport_calendar_lunar_day(calendar.lunar_day);
+    centered(layer, note, x, y + 13, 26, &workout_font_12, selected ? UI_BACKGROUND : UI_MUTED);
+}
+
+static void calendar_page(lv_layer_t *layer) {
+    passport_calendar_t calendar;
+    if (!s_state.clock.valid || !passport_calendar_get(s_state.navigation.calendar_day, &calendar)) {home(layer); return;}
+    char value[64];
+    snprintf(value, sizeof(value), "%u年%u月", calendar.year, calendar.month);
+    title(layer, value);
+    small(layer, "休 假期 · 班 调休", 20, 66, 200);
+    static const char *const weekdays[] = {"一","二","三","四","五","六","日"};
+    for (unsigned i = 0; i < 7; i++) centered(layer, weekdays[i], 22 + (int)i * 28, 85, 26, &workout_font_12, UI_MUTED);
+    unsigned offset = passport_calendar_month_offset(&calendar);
+    unsigned days = passport_calendar_month_days(calendar.year, calendar.month);
+    int32_t first = s_state.navigation.calendar_day - (int32_t)calendar.day + 1;
+    for (unsigned i = 0; i < days; i++) calendar_cell(layer, first + (int32_t)i, (i + offset) / 7, (i + offset) % 7);
+    snprintf(value, sizeof(value), "%02u/%02u %s %s", calendar.month, calendar.day, calendar.lunar, calendar.festival);
+    codex_block(layer, value, 20, 269, 200, &workout_font_12, 1, UI_MUTED);
+    hint(layer, "上下 逐日 · 确定 黄历");
+}
+
+static void almanac(lv_layer_t *layer) {
+    passport_calendar_t calendar;
+    if (!s_state.clock.valid || !passport_calendar_get(s_state.navigation.calendar_day, &calendar)) {home(layer); return;}
+    title(layer, "黄历详情");
+    char value[64];
+    calendar_date_text(&calendar, value);
+    small(layer, value, 20, 65, 200);
+    snprintf(value, sizeof(value), "农历 %s", calendar.lunar);
+    label(layer, value, 20, 89, 200, &workout_font_20, UI_INK);
+    calendar_event_text(&calendar, value);
+    if (!value[0]) snprintf(value, sizeof(value), "%s年 · %s日", calendar.year_ganzhi, calendar.day_ganzhi);
+    small(layer, value, 20, 120, 200);
+    snprintf(value, sizeof(value), "值神 %s", calendar.deity);
+    label(layer, value, 20, 148, 100, &workout_font_12, UI_INK);
+    day_quality(layer, &calendar, 148, 220);
+    calendar_rows(layer, &calendar, true);
+    small(layer, "民俗参考 · 宜忌节选", 20, 272, 200);
+    hint(layer, "上下 查日 · 确定 月历");
 }
 
 static const char *codex_status(const codex_task_t *task) {
@@ -650,6 +828,9 @@ static void draw(lv_event_t *event) {
     lv_layer_t *layer = lv_event_get_layer(event);
     header(layer);
     switch (s_state.navigation.view) {
+        case WORKOUT_VIEW_HOME: home(layer); break;
+        case WORKOUT_VIEW_CALENDAR: calendar_page(layer); break;
+        case WORKOUT_VIEW_ALMANAC: almanac(layer); break;
         case WORKOUT_VIEW_DASHBOARD: dashboard(layer); break;
         case WORKOUT_VIEW_DETAILS: details(layer); break;
         case WORKOUT_VIEW_MENU: menu(layer); break;

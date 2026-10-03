@@ -1,5 +1,7 @@
 /* Exercise the actual application input/wake boundary, without a screen or radio. */
+#define time passport_test_time
 #include "../main/main.c"
+#undef time
 #include <assert.h>
 #include <stdio.h>
 
@@ -11,6 +13,12 @@ static codex_monitor_state_t s_next_update;
 static codex_alert_t s_test_alert;
 static bool s_alert_ready;
 static workout_input_t s_queued_input;
+static time_t s_wall_clock;
+
+time_t passport_test_time(time_t *value) {
+    if (value) *value = s_wall_clock;
+    return s_wall_clock;
+}
 
 void test_log(const char *tag, const char *format, ...) { (void)tag; (void)format; }
 int64_t esp_timer_get_time(void) { return s_test_clock * 1000; }
@@ -35,6 +43,7 @@ int xQueueSend(QueueHandle_t queue, const void *value, unsigned timeout) {
 
 static void fixture(void) {
     memset(&s_state, 0, sizeof(s_state)); memset(&s_test_alert, 0, sizeof(s_test_alert));
+    s_state.navigation.view = WORKOUT_VIEW_DASHBOARD;
     s_backlight_calls = s_network_calls = s_ui_calls = 0;
     s_update_ready = s_alert_ready = false; s_test_clock = s_state.now_ms = 1000;
     s_state.network.online = true; s_state.codex.available = true;
@@ -107,7 +116,35 @@ static void independent_alert_freshness(void) {
     assert(update_codex() && !s_state.codex_popup);
 }
 
+static void home_clock_and_busy_navigation(void) {
+    fixture(); s_wall_clock = 0; s_brightness = 100;
+    s_state.navigation.view = WORKOUT_VIEW_HOME;
+    s_state.network.profile_busy = true;
+    update_clock(); handle_input(WORKOUT_INPUT_OK);
+    assert(!s_state.clock.valid && s_state.navigation.view == WORKOUT_VIEW_HOME);
+    int64_t stamp;
+    assert(workout_parse_timestamp("2026-10-03T09:41:00+08:00", &stamp));
+    s_wall_clock = (time_t)stamp; update_clock();
+    assert(s_state.clock.valid && s_state.clock.hour == 9 && s_state.clock.minute == 41);
+    unsigned before = s_ui_calls;
+    s_wall_clock += 10; update_clock();
+    assert(s_ui_calls == before); /* Avoid redrawing a minute-only clock ten times per second. */
+    s_wall_clock += 60; update_clock();
+    assert(s_ui_calls == before + 1 && s_state.clock.minute == 42);
+    handle_input(WORKOUT_INPUT_OK);
+    assert(s_state.navigation.view == WORKOUT_VIEW_CALENDAR && !s_network_calls);
+    int32_t selected = s_state.navigation.calendar_day;
+    handle_input(WORKOUT_INPUT_OK);
+    assert(s_state.navigation.view == WORKOUT_VIEW_ALMANAC && !s_network_calls);
+    assert(workout_parse_timestamp("2026-10-04T00:00:00+08:00", &stamp));
+    s_wall_clock = (time_t)stamp; update_clock();
+    assert(s_state.navigation.today == selected + 1 && s_state.navigation.calendar_day == selected);
+    handle_input(WORKOUT_INPUT_MENU); handle_input(WORKOUT_INPUT_MENU); handle_input(WORKOUT_INPUT_OK);
+    assert(s_state.navigation.view == WORKOUT_VIEW_CALENDAR && s_state.navigation.calendar_day == selected + 1);
+}
+
 int main(void) {
     popup_and_keys(); stale_and_source(); snapshot_and_callback(); independent_alert_freshness();
+    home_clock_and_busy_navigation();
     puts("Codex actual app popup, read-only keys, wake and callback: PASS"); return 0;
 }

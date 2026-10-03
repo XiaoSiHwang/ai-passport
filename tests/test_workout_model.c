@@ -99,12 +99,12 @@ static void cache(void) {
 }
 
 static void navigation(void) {
-    workout_navigation_t nav = {0};
+    workout_navigation_t nav = {.view = WORKOUT_VIEW_DASHBOARD};
     assert(workout_navigate(&nav, WORKOUT_INPUT_UP) == WORKOUT_ACTION_NONE && nav.monthly);
     workout_navigate(&nav, WORKOUT_INPUT_OK);
     assert(nav.view == WORKOUT_VIEW_DETAILS);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
-    assert(nav.view == WORKOUT_VIEW_MENU);
+    assert(nav.view == WORKOUT_VIEW_MENU && nav.selection == 1);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_NONE);
     assert(nav.view == WORKOUT_VIEW_AI && nav.ai_provider == 0);
@@ -115,9 +115,18 @@ static void navigation(void) {
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
     assert(nav.ai_provider == 0 && !nav.ai_weekly);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
+    assert(nav.selection == 2);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_CODEX);
+    workout_navigate(&nav, WORKOUT_INPUT_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
-    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_NONE);
+    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SYNC);
+    assert(nav.view == WORKOUT_VIEW_HOME && nav.monthly);
+    workout_navigate(&nav, WORKOUT_INPUT_MENU);
+    workout_navigate(&nav, WORKOUT_INPUT_UP);
+    assert(nav.selection == WORKOUT_MENU_COUNT - 1);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
     assert(nav.view == WORKOUT_VIEW_NETWORK);
     workout_navigate(&nav, WORKOUT_INPUT_OK);
     assert(nav.view == WORKOUT_VIEW_WIFI);
@@ -132,17 +141,49 @@ static void navigation(void) {
     workout_navigate(&nav, WORKOUT_INPUT_CLEAR);
     assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_CLEAR);
     assert(workout_navigate(&nav, WORKOUT_INPUT_MENU) == WORKOUT_ACTION_SETUP_STOP);
+}
+
+static void home_navigation(void) {
+    workout_navigation_t nav = {0};
+    assert(nav.view == WORKOUT_VIEW_HOME);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_HOME); /* Unknown wall clock never shows an invented date. */
+    nav.clock_valid = true; nav.today = 20729;
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_CALENDAR && nav.calendar_day == nav.today);
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    assert(nav.calendar_day == nav.today + 1);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_ALMANAC);
+    workout_navigate(&nav, WORKOUT_INPUT_UP);
+    assert(nav.calendar_day == nav.today);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_CALENDAR);
+    nav.calendar_day = PASSPORT_CALENDAR_FIRST_DAY;
+    workout_navigate(&nav, WORKOUT_INPUT_UP);
+    assert(nav.calendar_day == PASSPORT_CALENDAR_FIRST_DAY);
+    nav.calendar_day = PASSPORT_CALENDAR_LAST_DAY;
+    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
+    assert(nav.calendar_day == PASSPORT_CALENDAR_LAST_DAY);
+    workout_navigate(&nav, WORKOUT_INPUT_MENU);
+    assert(nav.selection == 0 && nav.view == WORKOUT_VIEW_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_MENU);
     workout_navigate(&nav, WORKOUT_INPUT_UP);
-    assert(nav.selection == 4);
+    assert(nav.home_focus == 2);
     workout_navigate(&nav, WORKOUT_INPUT_OK);
-    assert(nav.view == WORKOUT_VIEW_CODEX);
-    workout_navigate(&nav, WORKOUT_INPUT_MENU);
+    assert(nav.view == WORKOUT_VIEW_AI && nav.ai_provider == 1 && !nav.ai_weekly);
+    nav.view = WORKOUT_VIEW_HOME; nav.home_focus = 0;
     workout_navigate(&nav, WORKOUT_INPUT_DOWN);
-    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
-    workout_navigate(&nav, WORKOUT_INPUT_DOWN);
-    assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == WORKOUT_ACTION_SYNC);
-    assert(nav.view == WORKOUT_VIEW_DASHBOARD && nav.monthly);
+    workout_navigate(&nav, WORKOUT_INPUT_OK);
+    assert(nav.view == WORKOUT_VIEW_AI && nav.ai_provider == 0);
+    const workout_view_t expected[] = {WORKOUT_VIEW_HOME, WORKOUT_VIEW_DASHBOARD, WORKOUT_VIEW_AI,
+        WORKOUT_VIEW_CODEX, WORKOUT_VIEW_HOME, WORKOUT_VIEW_NETWORK};
+    for (unsigned i = 0; i < WORKOUT_MENU_COUNT; i++) {
+        nav.view = WORKOUT_VIEW_MENU; nav.selection = i;
+        assert(workout_menu_view(i) == expected[i]);
+        assert(workout_navigate(&nav, WORKOUT_INPUT_OK) == (i == 4 ? WORKOUT_ACTION_SYNC : WORKOUT_ACTION_NONE));
+        assert(nav.view == expected[i]);
+    }
 }
 
 static void profile_navigation(void) {
@@ -173,7 +214,7 @@ static void profile_navigation(void) {
 }
 
 int main(void) {
-    dates(); urls(); cache(); navigation(); profile_navigation();
+    dates(); urls(); cache(); navigation(); home_navigation(); profile_navigation();
     puts("Workout model: PASS");
     return 0;
 }
